@@ -528,6 +528,11 @@ PS2Runtime::~PS2Runtime()
 {
     try
     {
+        if (m_runMode.deterministic)
+        {
+            // The fixed clock is process-wide; hand the real one back.
+            ps2_host_clock::setDeterministic(false);
+        }
         requestStop();
         m_iopSubsystem.reset();
         m_iopHost.reset();
@@ -728,6 +733,16 @@ void PS2Runtime::setRunMode(const RunMode &mode)
 const PS2Runtime::RunMode &PS2Runtime::runMode() const
 {
     return m_runMode;
+}
+
+void PS2Runtime::setVSyncObserver(VSyncObserver observer)
+{
+    m_vsyncObserver = std::move(observer);
+}
+
+const PS2Runtime::VSyncObserver &PS2Runtime::vsyncObserver() const
+{
+    return m_vsyncObserver;
 }
 
 bool PS2Runtime::initialize(const char *title)

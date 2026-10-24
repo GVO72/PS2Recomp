@@ -1926,6 +1926,11 @@ void EeScheduler::processEvent(const EeEvent &event)
         requestStop();
         break;
     case EeEventType::VBlankStart:
+        if (m_stopRequested.load(std::memory_order_acquire) && m_runtime.vsyncObserver())
+        {
+            // An observer asked to stop: this field (and any later one) is not processed.
+            break;
+        }
         ++m_vsyncTick;
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         if ((m_vsyncTick & 1u) != 0u)
@@ -1935,6 +1940,14 @@ void EeScheduler::processEvent(const EeEvent &event)
         else
         {
             m_runtime.memory().gs().csr.fetch_and(~0x2000ull, std::memory_order_acq_rel);
+        }
+        if (const PS2Runtime::VSyncObserver &observer = m_runtime.vsyncObserver())
+        {
+            observer(m_runtime, m_vsyncTick - 1u);
+            if (m_stopRequested.load(std::memory_order_acquire))
+            {
+                break;
+            }
         }
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)

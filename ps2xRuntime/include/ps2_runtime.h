@@ -325,6 +325,23 @@ public:
     void setRunMode(const RunMode &mode);
     const RunMode &runMode() const;
 
+    // Called on the game thread for every VBlankStart, in every mode, with the frame number
+    // (0 for the first VBlankStart after the scheduler's reset). It runs right after the
+    // vsync counter is incremented and GS CSR.VSINT (and FIELD) are set, and before the
+    // vsync flag and tick are written to the guest, the vsync waiters are woken, the
+    // sceGsSyncVCallback is queued or INTC 2 is raised, so the guest state is the state at
+    // the end of the previous field.
+    //
+    // The observer may call requestStop(). Then no further VBlankStart is processed and the
+    // observer is not called again; the rest of that VBlankStart (waiters, callbacks, INTC 2)
+    // is skipped. The scheduler handles events only between guest dispatches, so no guest
+    // instruction runs after the observer returns: other events due in the same batch (a
+    // VBlankEnd, a timer) may still be queued, but the dispatch loop sees the stop first.
+    // Set it before run(); it is not synchronised against a running game thread.
+    using VSyncObserver = std::function<void(PS2Runtime &, uint64_t frame)>;
+    void setVSyncObserver(VSyncObserver observer);
+    const VSyncObserver &vsyncObserver() const;
+
     bool initialize(const char *title = "PS2 Game");
     bool syncCoreSubsystems();
     bool loadELF(const std::string &elfPath);
@@ -565,6 +582,7 @@ private:
     void *m_debugUiUserData = nullptr;
     bool m_debugUiInitialized = false;
     RunMode m_runMode{};
+    VSyncObserver m_vsyncObserver;
 
 public:
     std::atomic<uint32_t> m_debugPc{0};
