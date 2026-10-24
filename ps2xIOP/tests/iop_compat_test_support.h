@@ -93,6 +93,7 @@ namespace iop_test
             return false;
         }
         void log(LogLevel, std::string_view message) override { logs.emplace_back(message); }
+        void writeConsole(std::string_view text) override { console += text; }
 
         uint32_t word(uint32_t address) const
         {
@@ -109,6 +110,7 @@ namespace iop_test
         std::vector<uint8_t> guest;
         std::vector<uint8_t> file;
         std::vector<std::string> logs;
+        std::string console;
         std::vector<MemoryCardRequest> cardCalls;
         mutable size_t guestReads = 0u;
         size_t guestWrites = 0u;
