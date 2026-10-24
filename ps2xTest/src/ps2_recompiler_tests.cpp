@@ -698,6 +698,54 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithPackedCallbackStore(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    // Two callbacks packed into one 64-bit register and stored with a single SD,
+    // as EE GCC does when it fills two adjacent pointer fields of a struct.
+    std::array<uint32_t, 24> textWords{};
+    textWords[0] = 0x3C030010u;  // lui v1,0x10
+    textWords[1] = 0x24630048u;  // addiu v1,v1,0x48 (callback at 0x00100048)
+    textWords[2] = 0x3C100010u;  // lui s0,0x10
+    textWords[3] = 0x26100040u;  // addiu s0,s0,0x40 (leaf at 0x00100040)
+    textWords[4] = 0x0003183Cu;  // dsll32 v1,v1,0 (upper half)
+    textWords[5] = 0x0010803Cu;  // dsll32 s0,s0,0
+    textWords[6] = 0x0010803Eu;  // dsrl32 s0,s0,0 (zero-extended lower half)
+    textWords[7] = 0x02038025u;  // or s0,s0,v1
+    textWords[8] = 0xFC900000u;  // sd s0,0(a0)
+    textWords[9] = 0x03E00008u;  // jr ra
+    textWords[10] = 0x00000000u; // nop
+
+    textWords[16] = 0x03E00008u; // two-instruction leaf at 0x00100040: jr ra
+    textWords[17] = 0x00001025u; // move v0,zero (delay slot)
+    textWords[18] = 0x84A2000Cu; // callback at 0x00100048: lh v0,12(a1)
+    textWords[19] = 0x24420001u; // addiu v0,v0,1
+    textWords[20] = 0x03E00008u; // jr ra
+    textWords[21] = 0x00000000u; // nop
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithInitializer(const std::filesystem::path &elfPath,
                                                const std::string &functionName,
                                                uint32_t initializerTarget)
@@ -1719,6 +1767,44 @@ void register_ps2_recompiler_tests()
                       "a data pointer must not split a function at a control-transfer delay slot");
             t.IsFalse(hasStart(0x00100300u),
                       "an isolated data pointer or non-callback code materialization must not become a function");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+        });
+
+        tc.Run("elf parser discovers callbacks packed into one 64-bit store", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-packed-callback-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithPackedCallbackStore(elfPath);
+            t.IsTrue(writeOk, "temporary stripped ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (!parseOk)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+
+            const auto functions = parser.extractFunctions();
+            auto hasStart = [&functions](uint32_t start)
+            {
+                return std::any_of(functions.begin(), functions.end(),
+                                   [start](const Function &function)
+                                   { return function.start == start; });
+            };
+
+            t.IsTrue(hasStart(0x00100048u),
+                     "a callback moved into the upper half by DSLL32 and stored by SD should be discovered");
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
