@@ -3,13 +3,16 @@
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "runtime/ee_kernel_area.h"
 #include "runtime/ee_scheduler.h"
 
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -946,14 +949,110 @@ void register_ps2_runtime_kernel_tests()
 
             env.runtime.guestFree(grown);
             const uint32_t reused = env.runtime.guestMalloc(0x80u, 16u);
-            t.Equals(reused, heapBase, "guestFree should make the head block reusable");
+            t.Equals(reused, env.runtime.guestHeapBase(), "guestFree should make the head block reusable");
+            t.IsTrue(reused >= ps2_kernel_area::kHeapBase && reused < ps2_kernel_area::kHeapEnd,
+                     "guestMalloc should hand out kernel-area memory, not the SetupHeap range");
+        });
+
+        tc.Run("guestMalloc stays in the kernel area after SetupHeap over user RAM", [](TestCase &t)
+        {
+            TestEnv env;
+
+            setRegU32(env.ctx, 4, 0x00200000u);
+            setRegU32(env.ctx, 5, 0x00100000u);
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
+
+            for (int i = 0; i < 16; ++i)
+            {
+                const uint32_t addr = env.runtime.guestMalloc(0x400u, 16u);
+                t.IsTrue(addr >= ps2_kernel_area::kHeapBase && addr + 0x400u <= ps2_kernel_area::kHeapEnd,
+                         "guestMalloc must not allocate from the game's heap range");
+            }
+            t.Equals(env.runtime.guestHeapBase(), ps2_kernel_area::kHeapBase,
+                     "SetupHeap must not move the runtime heap");
+            t.Equals(env.runtime.guestHeapLimit(), ps2_kernel_area::kHeapEnd,
+                     "SetupHeap must not move the runtime heap limit");
+            t.IsTrue(ps2_kernel_area::kHeapEnd <= 0x00100000u, "runtime heap is below the user RAM start");
+        });
+
+        tc.Run("SetupHeap and EndOfHeap follow the recorded bounds", [](TestCase &t)
+        {
+            TestEnv env;
+
+            setRegU32(env.ctx, 4, 0x00300000u);
+            setRegU32(env.ctx, 5, 0x00010000u);
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x00300000u, "SetupHeap returns the heap start");
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x00310000u, "EndOfHeap is start + size");
+
+            // SetupThread with an explicit stack records its bottom.
+            setRegU32(env.ctx, 4, 0u);
+            setRegU32(env.ctx, 5, 0x01E00000u);
+            setRegU32(env.ctx, 6, 0x00100000u);
+            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
+
+            setRegU32(env.ctx, 4, 0x00400010u);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+            t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x00400010u, "SetupHeap returns the heap start for size -1");
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0x01E00000u,
+                     "EndOfHeap with size -1 is the main thread stack bottom");
+
+            // SetupThread with stack -1 puts the stack at the top of RAM.
+            setRegU32(env.ctx, 4, 0u);
+            setRegU32(env.ctx, 5, 0xFFFFFFFFu);
+            setRegU32(env.ctx, 6, 0x00020000u);
+            t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime), "SetupThread syscall should dispatch");
+            t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), PS2_RAM_SIZE - 0x1000u - 0x00020000u,
+                     "EndOfHeap with size -1 follows the stack at the top of RAM");
+        });
+
+        tc.Run("guestMalloc exhaustion returns 0 and logs once", [](TestCase &t)
+        {
+            TestEnv env;
+
+            std::ostringstream captured;
+            std::streambuf *old = std::cerr.rdbuf(captured.rdbuf());
+            const uint32_t heapBytes = ps2_kernel_area::kHeapEnd - ps2_kernel_area::kHeapBase;
+            const uint32_t whole = env.runtime.guestMalloc(heapBytes, 16u);
+            const uint32_t over1 = env.runtime.guestMalloc(0x10u, 16u);
+            const uint32_t over2 = env.runtime.guestMalloc(0x10u, 16u);
+            std::cerr.rdbuf(old);
+
+            t.Equals(whole, ps2_kernel_area::kHeapBase, "the whole heap should be allocatable");
+            t.Equals(over1, 0u, "exhausted heap returns 0");
+            t.Equals(over2, 0u, "exhausted heap keeps returning 0");
+            const std::string log = captured.str();
+            const size_t first = log.find("[guest-heap] runtime heap exhausted");
+            t.IsTrue(first != std::string::npos, "exhaustion should be logged");
+            t.IsTrue(first != std::string::npos && log.find("[guest-heap] runtime heap exhausted", first + 1) == std::string::npos,
+                     "exhaustion should be logged once");
+        });
+
+        tc.Run("runtime-private pools live in the kernel area", [](TestCase &t)
+        {
+            using namespace ps2_kernel_area;
+            auto inArea = [](uint32_t base, uint32_t bytes)
+            { return base >= 0x00020000u && base + bytes <= kEnd; };
+            t.IsTrue(inArea(kRpcPacketPoolBase, kRpcPacketPoolBytes), "RPC packet pool is in the kernel area");
+            t.IsTrue(inArea(kRpcServerPoolBase, kRpcServerPoolBytes), "RPC server pool is in the kernel area");
+            t.IsTrue(inArea(kTlsPoolBase, kTlsPoolBytes), "TLS pool is in the kernel area");
+            t.IsTrue(inArea(kBootModePoolBase, kBootModePoolBytes), "bootmode pool is in the kernel area");
+            t.IsTrue(inArea(kStackPoolBase, kStackPoolEnd - kStackPoolBase), "callback stack pool is in the kernel area");
+            t.IsTrue(inArea(kHeapBase, kHeapEnd - kHeapBase), "runtime heap is in the kernel area");
+            t.IsTrue(kStackPoolBase > 0x00011F80u + 0x400u, "the pools start above the SetSyscall mirror table");
+
+            TestEnv env;
+            const uint32_t sp = env.runtime.reserveAsyncCallbackStack(0x4000u, 16u);
+            t.IsTrue(sp > kStackPoolBase && sp <= kStackPoolEnd, "callback stacks come from the kernel-area pool");
         });
 
         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)
         {
             TestEnv env;
-
-            env.runtime.configureGuestHeap(0x00180010u, 0x00182010u);
 
             setRegU32(env.ctx, 4, 128u);
             setRegU32(env.ctx, 5, 0x40u);
@@ -974,8 +1073,6 @@ void register_ps2_runtime_kernel_tests()
         tc.Run("allocator compatibility stubs use the runtime guest heap", [](TestCase &t)
         {
             TestEnv env;
-
-            env.runtime.configureGuestHeap(0x00180010u, 0x00183010u);
 
             setRegU32(env.ctx, 5, 0x20u);
             ps2_stubs::malloc_r(env.rdram.data(), &env.ctx, &env.runtime);
@@ -1088,14 +1185,15 @@ void register_ps2_runtime_kernel_tests()
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "PollSema should reject unknown semaphore ids");
 
-            setRegU32(env.ctx, 4, 0xFFFFFFFFu);
+            setRegU32(env.ctx, 4, 0x00200000u);
+            setRegU32(env.ctx, 5, 0x100u);
             t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
             const uint32_t clampedBase = static_cast<uint32_t>(getRegS32(env.ctx, 2));
-            t.IsTrue(clampedBase < PS2_RAM_SIZE, "SetupHeap should normalize out-of-range base into guest RAM");
+            t.Equals(clampedBase, 0x00200000u, "SetupHeap should return the heap start it recorded");
 
             t.IsTrue(callSyscall(0x3Eu, env.rdram.data(), &env.ctx, &env.runtime), "EndOfHeap syscall should dispatch");
             const uint32_t heapEnd = static_cast<uint32_t>(getRegS32(env.ctx, 2));
-            t.IsTrue(heapEnd >= clampedBase, "EndOfHeap should be at or above normalized heap base");
+            t.Equals(heapEnd, clampedBase + 0x100u, "EndOfHeap should be the recorded start plus size");
 
             setRegU32(env.ctx, 4, 1u);
             setRegU32(env.ctx, 5, 0u);
@@ -1111,7 +1209,8 @@ void register_ps2_runtime_kernel_tests()
             TestEnv env;
             constexpr uint32_t kInitialLoaderSp = PS2_RAM_SIZE - 0x10u;
             constexpr uint32_t kMainStackSize = 0x00020000u;
-            constexpr uint32_t kExpectedStack = PS2_RAM_SIZE - kMainStackSize;
+            constexpr uint32_t kExpectedTop = PS2_RAM_SIZE - 0x1000u;
+            constexpr uint32_t kExpectedStack = kExpectedTop - kMainStackSize;
             constexpr uint32_t kMainGp = 0x0036A7F0u;
 
             env.ctx.pc = 0x00100000u;
@@ -1121,8 +1220,8 @@ void register_ps2_runtime_kernel_tests()
             setRegU32(env.ctx, 6, kMainStackSize);
             t.IsTrue(callSyscall(0x3Cu, env.rdram.data(), &env.ctx, &env.runtime),
                      "SetupThread syscall should dispatch");
-            t.Equals(::getRegU32(&env.ctx, 2), kExpectedStack,
-                     "automatic main stack should start below the reserved top-of-RDRAM area");
+            t.Equals(::getRegU32(&env.ctx, 2), kExpectedTop,
+                     "SetupThread should return the top of the automatic main stack, below the reserved last page");
 
             // ReferThreadStatus can be called after many nested frames have moved $sp.
             // It must report the initial stack recorded by SetupThread, not this live snapshot.

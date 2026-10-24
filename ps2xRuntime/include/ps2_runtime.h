@@ -468,7 +468,6 @@ public:
     void handleTLBWR(uint8_t *rdram, R5900Context *ctx);
     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
     void clearLLBit(R5900Context *ctx);
-    void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
     uint32_t guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t alignment = 16u);
@@ -476,6 +475,13 @@ public:
     uint32_t guestHeapBase() const;
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
+    // SetupHeap/EndOfHeap bookkeeping. The kernel only records the bounds; nothing in the
+    // runtime allocates from this range (guestMalloc has its own heap in the kernel area).
+    // A size of -1 means "up to the main thread's stack bottom", resolved by the caller.
+    void recordKernelHeap(uint32_t start, int32_t size);
+    bool kernelHeapRecorded() const;
+    uint32_t kernelHeapStart() const;
+    int32_t kernelHeapSize() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
@@ -560,9 +566,7 @@ private:
     static uint32_t alignGuestHeapValue(uint32_t value, uint32_t alignment);
     static bool isGuestHeapAlignmentValid(uint32_t alignment);
     static uint32_t normalizeGuestHeapAlignment(uint32_t alignment);
-    uint32_t clampGuestHeapBase(uint32_t guestBase) const;
-    uint32_t clampGuestHeapLimit(uint32_t guestLimit) const;
-    void resetGuestHeapLocked(uint32_t guestBase, uint32_t guestLimit);
+    void resetGuestHeapLocked();
     void ensureGuestHeapInitializedLocked();
     int32_t findGuestHeapBlockIndexLocked(uint32_t guestAddr) const;
     uint32_t allocateGuestBlockLocked(uint32_t size, uint32_t alignment);
@@ -606,13 +610,16 @@ private:
     mutable std::mutex m_guestHeapMutex;
     mutable std::mutex m_asyncCallbackStackMutex;
     std::vector<GuestHeapBlock> m_guestHeapBlocks;
-    uint32_t m_guestHeapBase = 0x00100000u;
-    uint32_t m_guestHeapEnd = 0x00100000u;
-    uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
-    uint32_t m_guestHeapSuggestedBase = 0x00100000u;
+    uint32_t m_guestHeapBase = 0u;
+    uint32_t m_guestHeapEnd = 0u;
+    uint32_t m_guestHeapLimit = 0u;
     bool m_guestHeapConfigured = false;
-    uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
-    uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    bool m_guestHeapExhaustionReported = false;
+    uint32_t m_kernelHeapStart = 0u;
+    int32_t m_kernelHeapSize = 0;
+    bool m_kernelHeapRecorded = false;
+    uint32_t m_asyncCallbackStackFloor = 0u;
+    uint32_t m_asyncCallbackStackTop = 0u;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};

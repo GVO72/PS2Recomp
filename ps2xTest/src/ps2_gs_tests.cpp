@@ -4203,7 +4203,6 @@ void register_ps2_gs_tests()
             PS2Runtime runtime;
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
-            runtime.configureGuestHeap(0x01F00000u, 0x01F00000u);
             runtime.registerFunction(kGsCallbackMainPc, testGsCallbackMain);
             runtime.registerFunction(kGsCallbackResumePc, testGsCallbackResume);
             runtime.registerFunction(kGsCallbackPc, testGsSyncVCallback);
@@ -4221,8 +4220,9 @@ void register_ps2_gs_tests()
                      "VSync callback should receive a positive tick value");
             t.Equals(g_gsSyncCallbackGp.load(std::memory_order_acquire), kGsCallbackGp,
                      "callback invocation should preserve the registered GP");
-            t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) >= 0x01F00000u,
-                     "callback invocation should use the reserved async stack pool");
+            t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) >= 0x00025000u &&
+                         g_gsSyncCallbackSp.load(std::memory_order_acquire) < 0x00075000u,
+                     "callback invocation should use the reserved async stack pool in the kernel area");
             t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) != kGsCallbackCallerSp,
                      "callback invocation must not reuse the caller stack");
         });

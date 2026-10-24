@@ -543,6 +543,9 @@ namespace ps2_syscalls
         setReturnS32(ctx, 0);
     }
 
+    // The last page of RAM is not part of an automatically placed main stack.
+    static constexpr uint32_t kMainStackTopReserve = 0x1000u;
+
     // 0x3C SetupThread
     // args: $a0 = gp, $a1 = stack, $a2 = stack_size, $a3 = args, $t0 = root_func
     void SetupThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -564,24 +567,16 @@ namespace ps2_syscalls
         const uint32_t stackSize = stackSizeSigned > 0
                                        ? static_cast<uint32_t>(stackSizeSigned)
                                        : 0u;
+        uint32_t autoStackBottom = 0u;
         if (stack == 0xFFFFFFFFu)
         {
-            if (stackSizeSigned > 0)
-            {
-                const uint32_t requestedSize = static_cast<uint32_t>(stackSizeSigned);
-                if (requestedSize < PS2_RAM_SIZE)
-                {
-                    sp = PS2_RAM_SIZE - requestedSize;
-                }
-                else
-                {
-                    sp = PS2_RAM_SIZE;
-                }
-            }
-            else
-            {
-                sp = PS2_RAM_SIZE;
-            }
+            // Stack -1: the kernel places the stack at the top of RAM. The last page is not part
+            // of it (observed on the reference run), and the returned stack pointer is the top.
+            const uint32_t top = PS2_RAM_SIZE - kMainStackTopReserve;
+            sp = top;
+            autoStackBottom = (stackSizeSigned > 0 && static_cast<uint32_t>(stackSizeSigned) < top)
+                                  ? top - static_cast<uint32_t>(stackSizeSigned)
+                                  : top;
         }
         else if (stack != 0u)
         {
@@ -598,7 +593,7 @@ namespace ps2_syscalls
         sp &= ~0xFu;
         if (stack == 0xFFFFFFFFu)
         {
-            initialStack = sp;
+            initialStack = autoStackBottom;
         }
         else if (stack != 0u)
         {
@@ -609,62 +604,73 @@ namespace ps2_syscalls
         setReturnU32(ctx, sp);
     }
 
-    // 0x3D SetupHeap: returns heap base/start pointer
+    // Bottom of the main thread's stack as recorded by SetupThread; 0 when SetupThread has
+    // not established one.
+    static uint32_t mainThreadStackBottom(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.bindMainContextForSyscall(*ctx, rdram);
+        const GuestThread *main = scheduler.thread(EeScheduler::kMainThreadId);
+        return main ? main->stack : 0u;
+    }
+
+    // 0x3D SetupHeap(start, size): the kernel only records the heap bounds for EndOfHeap
+    // (and the game's sbrk). It never allocates from user memory, and neither does the
+    // runtime: its own guestMalloc heap lives in the kernel area. Returns the heap start.
+    // A size of -1 means "up to the main thread's stack", resolved by EndOfHeap.
     void SetupHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t heapBaseRaw = getRegU32(ctx, 4); // $a0
-        const uint32_t heapSize = getRegU32(ctx, 5);    // $a1 (optional size)
-
-        const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
-
-        // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
-        uint32_t heapLimit = kDefaultGuestHeapEnd;
-
-        if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
-        {
-            const uint64_t candidate = static_cast<uint64_t>(heapBase) + static_cast<uint64_t>(heapSize);
-            heapLimit = static_cast<uint32_t>(std::min<uint64_t>(candidate, kDefaultGuestHeapEnd));
-        }
-
-        if (heapLimit <= heapBase)
-        {
-            heapLimit = kDefaultGuestHeapEnd;
-        }
+        (void)rdram;
+        const uint32_t heapStart = getRegU32(ctx, 4); // $a0
+        const int32_t heapSize = static_cast<int32_t>(getRegU32(ctx, 5)); // $a1
 
         if (runtime)
         {
-            runtime->configureGuestHeap(heapBase, heapLimit);
+            runtime->recordKernelHeap(heapStart, heapSize);
+        }
 
-            PS2_IF_AGRESSIVE_LOGS({
-                std::cerr << "[SetupHeap]"
-                          << " base=0x" << std::hex << heapBaseRaw
-                          << " alignedBase=0x" << heapBase
-                          << " size=0x" << heapSize
-                          << " runtimeBase=0x" << runtime->guestHeapBase()
-                          << " runtimeEnd=0x" << runtime->guestHeapEnd()
-                          << std::dec << std::endl;
-            });
+        PS2_IF_AGRESSIVE_LOGS({
+            std::cerr << "[SetupHeap]"
+                      << " start=0x" << std::hex << heapStart
+                      << " size=0x" << static_cast<uint32_t>(heapSize)
+                      << std::dec << std::endl;
+        });
 
-            setReturnU32(ctx, runtime->guestHeapBase());
+        setReturnU32(ctx, heapStart);
+    }
+
+    // 0x3E EndOfHeap: start + size of the recorded heap, or the main thread's stack bottom
+    // when the heap was set up with size -1.
+    void EndOfHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!runtime)
+        {
+            setReturnU32(ctx, PS2_RAM_SIZE);
             return;
         }
 
-        setReturnU32(ctx, heapBase);
-    }
+        const bool recorded = runtime->kernelHeapRecorded();
+        const int32_t size = runtime->kernelHeapSize();
+        if (recorded && size != -1)
+        {
+            setReturnU32(ctx, runtime->kernelHeapStart() + static_cast<uint32_t>(size));
+            return;
+        }
 
-    // 0x3E EndOfHeap: commonly returns current heap end; keep it stable for now.
-    void EndOfHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        (void)rdram;
+        if (!recorded)
+        {
+            std::cerr << "[EndOfHeap] called before SetupHeap; treating the heap as extending to the main thread stack"
+                      << std::endl;
+        }
 
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
-
-        const uint32_t ret = runtime
-                                 ? runtime->guestHeapLimit()
-                                 : kDefaultGuestHeapEnd;
-
-        setReturnU32(ctx, ret);
+        uint32_t stackBottom = mainThreadStackBottom(rdram, ctx, runtime);
+        if (stackBottom == 0u)
+        {
+            std::cerr << "[EndOfHeap] main thread stack not set up by SetupThread; returning the top of RAM"
+                      << std::endl;
+            stackBottom = PS2_RAM_SIZE;
+        }
+        setReturnU32(ctx, stackBottom);
     }
 
     void GetMemorySize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
