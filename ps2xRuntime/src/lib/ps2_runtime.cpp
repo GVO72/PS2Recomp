@@ -599,6 +599,19 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
     return m_iopSubsystem->handleRpc(request);
 }
 
+ps2x::iop::RpcResult PS2Runtime::handleIopRpcWithSendData(uint8_t *rdram, R5900Context *ctx,
+                                                          ps2x::iop::RpcRequest request,
+                                                          std::span<const uint8_t> sendData)
+{
+    auto scope = m_iopHost->enterCall(ctx, rdram);
+    request.callToken = scope.token();
+    request.send = {kIopRpcStagedSendAddress, static_cast<uint32_t>(sendData.size())};
+    m_iopHost->stageGuestRead(kIopRpcStagedSendAddress, sendData);
+    ps2x::iop::RpcResult result = m_iopSubsystem->handleRpc(request);
+    m_iopHost->clearStagedGuestRead();
+    return result;
+}
+
 void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
 {
     auto scope = m_iopHost->enterCall(nullptr, rdram);

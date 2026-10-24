@@ -271,6 +271,65 @@ void register_ps2_sif_dma_tests()
                      "the second reply should overwrite the consumed packet");
         });
 
+        tc.Run("SIF command protocol RPC calls touch EE memory only through replies", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kEePacketPhysical = 0x00021000u;
+            constexpr uint32_t kClient = 0x00023000u;
+            constexpr uint32_t kEePacketAddr = 0x00024000u;
+            constexpr uint32_t kArgAddr = 0x00025000u;
+            constexpr uint32_t kTextAddr = 0x00026000u;
+            constexpr uint32_t kRecvAddr = 0x00027000u;
+            constexpr uint32_t kCallSrcAddr = 0x00028000u;
+            constexpr uint32_t kCallDescAddr = 0x00028100u;
+            const uint32_t iopBuffer = querySifReg(env, 0x2u);
+            sendSifCommand(env, iopBuffer, {20u, 0u, 0x80000002u, 0u, kEePacketPhysical});
+
+            // Bind FILEIO, which the IOP always provides.
+            sendSifCommand(env, iopBuffer, {64u, 0u, 0x80000009u, 0u, 1u, kEePacketAddr, 2u, kClient, 0x80000001u,
+                                            0u, 0u, 0u, 0u, 0u, 0u, 0u});
+            const uint32_t server = readGuestU32(env.rdram.data(), kEePacketPhysical + 36u);
+            const uint32_t serverBuffer = readGuestU32(env.rdram.data(), kEePacketPhysical + 40u);
+            t.IsTrue(server != 0u && serverBuffer != 0u, "binding FILEIO should return a server and its buffer");
+            writeGuestU32(env.rdram.data(), kEePacketPhysical, 0u); // the EE consumed the reply
+
+            // fioWrite(1, "hello\n", 6): the argument goes to the server buffer,
+            // then the call packet to the command buffer, in one SetDma.
+            const std::array<uint32_t, 8> arg{1u, kTextAddr, 6u, 0u, 0u, 0u, 0u, 0u};
+            std::memcpy(env.rdram.data() + kArgAddr, arg.data(), sizeof(arg));
+            std::memcpy(env.rdram.data() + kTextAddr, "hello\n", 6u);
+            const std::array<uint32_t, 16> call{64u, 0u, 0x8000000Au, 0u, 3u, kEePacketAddr, 4u, kClient, 3u,
+                                                32u, kRecvAddr, 4u, 1u, server, 0u, 0u};
+            std::memcpy(env.rdram.data() + kCallSrcAddr, call.data(), sizeof(call));
+            const std::array<Ps2SifDmaTransfer, 2> descs{{
+                {kArgAddr, serverBuffer, 32, 0},
+                {kCallSrcAddr, iopBuffer, 64, 0x44},
+            }};
+            std::memcpy(env.rdram.data() + kCallDescAddr, descs.data(), sizeof(descs));
+
+            const std::vector<uint8_t> before = env.rdram;
+            setRegU32(env.ctx, 4, kCallDescAddr);
+            setRegU32(env.ctx, 5, 2u);
+            ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(readGuestU32(env.rdram.data(), kRecvAddr), 6u, "the write result reaches the receive buffer");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 8u), 0x80000008u, "RPC_END is delivered");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 32u), 0x8000000Au, "it ends the call");
+
+            bool untouched = true;
+            for (size_t i = 0; i < before.size(); ++i)
+            {
+                const bool reply = i >= kEePacketPhysical && i < kEePacketPhysical + 128u;
+                const bool received = i >= kRecvAddr && i < kRecvAddr + 4u;
+                if (!reply && !received && env.rdram[i] != before[i])
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "an RPC call must not write EE memory outside its reply and receive buffer");
+        });
+
         tc.Run("IOP heap DMA uses private backing instead of aliasing EE RDRAM", [](TestCase &t)
         {
             TestEnv env;

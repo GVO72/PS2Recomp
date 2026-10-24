@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <span>
 #include <unordered_map>
+#include <vector>
 
 class PS2Runtime;
 struct R5900Context;
@@ -87,8 +89,19 @@ public:
     void log(ps2x::iop::LogLevel level, std::string_view message) override;
     void writeConsole(std::string_view text) override;
 
+    // While set, readGuest serves [address, address + size) from these bytes
+    // instead of EE memory: RPC call data that arrived in IOP memory, handed to
+    // services that read their arguments as EE addresses, without writing it
+    // into the guest.
+    void stageGuestRead(uint32_t address, std::span<const uint8_t> bytes);
+    void clearStagedGuestRead();
+
 private:
     friend class CallScope;
+
+    std::vector<uint8_t> m_stagedRead;
+    uint32_t m_stagedReadAddress = 0u;
+    bool m_hasStagedRead = false;
 
     bool guestRange(uint32_t address, size_t size, uint8_t *&begin) const;
 

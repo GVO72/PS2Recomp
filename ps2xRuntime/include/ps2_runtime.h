@@ -20,6 +20,7 @@
 #include <mutex>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -361,6 +362,10 @@ public:
     // FILEIO, the tty device) to this file; empty stops it. Lines always go to
     // stdout too, prefixed with "[IOP tty] ".
     static void setIopConsolePath(const std::filesystem::path &path);
+
+    // Where handleIopRpcWithSendData presents the call data to IOP services:
+    // outside EE RAM, so it never shadows guest memory.
+    static constexpr uint32_t kIopRpcStagedSendAddress = 0x0E000000u;
     static void configureIoPathsFromElf(const std::string &elfPath);
 
     void SignalException(R5900Context *ctx, PS2Exception exception);
@@ -484,6 +489,11 @@ private:
     [[nodiscard]] ps2x::iop::RpcAbi selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const;
     [[nodiscard]] bool canBindIopRpc(uint32_t sid) const noexcept;
     [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
+    // handleIopRpc with the call's send data supplied by the caller (it arrived in IOP
+    // memory) instead of read from EE memory; request.send is replaced.
+    [[nodiscard]] ps2x::iop::RpcResult handleIopRpcWithSendData(uint8_t *rdram, R5900Context *ctx,
+                                                              ps2x::iop::RpcRequest request,
+                                                              std::span<const uint8_t> sendData);
     void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
     void advanceIopEeCycles(uint64_t eeCycles) noexcept;
     void resetIop();
