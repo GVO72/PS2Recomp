@@ -85,6 +85,7 @@ public:
     bool sendSifCommand(uint32_t commandId, const void *packet, size_t packetSize) override;
 
     void log(ps2x::iop::LogLevel level, std::string_view message) override;
+    void writeConsole(std::string_view text) override;
 
 private:
     friend class CallScope;

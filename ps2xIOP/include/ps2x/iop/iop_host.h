@@ -131,5 +131,12 @@ namespace ps2x::iop
         }
 
         virtual void log(LogLevel level, std::string_view message) = 0;
+
+        // Text the IOP writes to its console (stdout/stderr or the tty device),
+        // exactly as written: lines may arrive in pieces.
+        virtual void writeConsole(std::string_view text)
+        {
+            log(LogLevel::Info, text);
+        }
     };
 }

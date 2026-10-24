@@ -8,6 +8,85 @@ namespace
     constexpr uint32_t dbcSid = 0x80001300u;
     constexpr uint32_t dbcVersion = 0x80001363u;
     constexpr uint32_t mcSid = 0x80000400u;
+    constexpr uint32_t fileioSid = 0x80000001u;
+
+    // A FILEIO call whose argument block is at 0x100 in guest RAM.
+    RpcRequest fileioCall(Host &host, uint32_t function, std::span<const uint8_t> arg)
+    {
+        std::memcpy(host.guest.data() + 0x100u, arg.data(), arg.size());
+        RpcRequest call = request(fileioSid, function, 4u);
+        call.send = {0x100u, static_cast<uint32_t>(arg.size())};
+        return call;
+    }
+
+    std::vector<uint8_t> fileioWriteArg(int32_t fd, uint32_t ptr, uint32_t size, const std::string &head)
+    {
+        std::vector<uint8_t> arg(32u, 0u);
+        const uint32_t mis = static_cast<uint32_t>(head.size());
+        std::memcpy(arg.data(), &fd, 4u);
+        std::memcpy(arg.data() + 4u, &ptr, 4u);
+        std::memcpy(arg.data() + 8u, &size, 4u);
+        std::memcpy(arg.data() + 12u, &mis, 4u);
+        std::memcpy(arg.data() + 16u, head.data(), head.size());
+        return arg;
+    }
+
+    std::vector<uint8_t> fileioOpenArg(const std::string &name)
+    {
+        std::vector<uint8_t> arg(4u + 256u, 0u);
+        std::memcpy(arg.data() + 4u, name.data(), name.size());
+        return arg;
+    }
+
+    std::vector<uint8_t> fileioFdArg(int32_t fd)
+    {
+        std::vector<uint8_t> arg(16u, 0u);
+        std::memcpy(arg.data(), &fd, 4u);
+        return arg;
+    }
+
+    void fileioConsoleWrite()
+    {
+        Host host;
+        IopSubsystem iop(host);
+        require(iop.canBindRpc(fileioSid), "FILEIO must be bindable without loading a module");
+
+        // An unaligned buffer: the head up to 16-byte alignment travels in the
+        // argument, the rest is read from EE memory.
+        const std::string text = "hello, world!\n";
+        std::memcpy(host.guest.data() + 0x205u, text.data(), text.size());
+        host.fill(0x205u, 11u, 'x'); // the inline head must win over EE memory
+        const auto arg = fileioWriteArg(1, 0x205u, static_cast<uint32_t>(text.size()), text.substr(0, 11));
+        require(iop.handleRpc(fileioCall(host, 3u, arg)).handled, "write not handled");
+        require(host.console == text, "stdout write did not reach the console");
+        require(host.word(0x800u) == text.size(), "write must return the byte count");
+    }
+
+    void fileioTtyAndErrors()
+    {
+        Host host;
+        IopSubsystem iop(host);
+
+        require(iop.handleRpc(fileioCall(host, 0u, fileioOpenArg("tty0:"))).handled, "open not handled");
+        const uint32_t fd = host.word(0x800u);
+        require(fd == 3u, "the first tty descriptor should be 3");
+        const std::string text = "tty\n";
+        std::memcpy(host.guest.data() + 0x300u, text.data(), text.size());
+        require(iop.handleRpc(fileioCall(host, 3u, fileioWriteArg(3, 0x300u, 4u, ""))).handled, "write failed");
+        require(host.console == text, "a tty write should reach the console");
+        require(iop.handleRpc(fileioCall(host, 1u, fileioFdArg(3))).handled && host.word(0x800u) == 0u,
+                "closing the tty should succeed");
+
+        const size_t logs = host.logs.size();
+        require(iop.handleRpc(fileioCall(host, 3u, fileioWriteArg(3, 0x300u, 4u, ""))).handled, "write failed");
+        require(static_cast<int32_t>(host.word(0x800u)) == -9, "a closed descriptor is EBADF");
+        require(iop.handleRpc(fileioCall(host, 0u, fileioOpenArg("cdrom0:\\X.BIN;1"))).handled, "open failed");
+        require(static_cast<int32_t>(host.word(0x800u)) == -2, "non-tty opens are not implemented");
+        require(iop.handleRpc(fileioCall(host, 4u, fileioFdArg(1))).handled, "lseek not handled");
+        require(static_cast<int32_t>(host.word(0x800u)) == -5, "unimplemented functions fail");
+        require(host.logs.size() == logs + 3u, "each unsupported request must be logged");
+        require(host.console == text, "failed requests must not print anything");
+    }
 
     void dbcDefault()
     {
@@ -310,6 +389,8 @@ int main()
         {"HLE repeated loads and alias lifetime", moduleLifetime},
         {"Loader outcomes are bounded and resettable", loaderDiagnostics},
         {"LIBSD audio dispatch is unchanged", libsdUnchanged},
+        {"FILEIO writes stdout to the console", fileioConsoleWrite},
+        {"FILEIO tty descriptors and logged errors", fileioTtyAndErrors},
     };
     return run(tests);
 }

@@ -357,6 +357,10 @@ public:
 
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
+    // Also write each complete line of IOP console output (stdout/stderr through
+    // FILEIO, the tty device) to this file; empty stops it. Lines always go to
+    // stdout too, prefixed with "[IOP tty] ".
+    static void setIopConsolePath(const std::filesystem::path &path);
     static void configureIoPathsFromElf(const std::string &elfPath);
 
     void SignalException(R5900Context *ctx, PS2Exception exception);
