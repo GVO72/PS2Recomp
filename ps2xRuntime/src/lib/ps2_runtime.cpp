@@ -716,8 +716,13 @@ bool PS2Runtime::syncCoreSubsystems()
 void PS2Runtime::setRunMode(const RunMode &mode)
 {
     m_runMode = mode;
-    // Headless has no window to read input from.
-    m_padBackend.setHostInputEnabled(!mode.headless);
+    // Headless has no window to read input from, and deterministic mode reads none.
+    m_padBackend.setHostInputEnabled(!mode.headless && !mode.deterministic);
+    ps2_host_clock::setDeterministic(mode.deterministic);
+    ps2x::iop::VblankTiming timing;
+    timing.exact = mode.deterministic;
+    timing.pal = mode.videoMode == VideoMode::Pal;
+    m_iopSubsystem->setVblankTiming(timing);
 }
 
 const PS2Runtime::RunMode &PS2Runtime::runMode() const
