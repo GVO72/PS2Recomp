@@ -2243,6 +2243,27 @@ const EeScheduler &PS2Runtime::eeScheduler() const
     return *m_eeScheduler;
 }
 
+const R5900Context &PS2Runtime::observedEeContext() const
+{
+    if (m_eeScheduler)
+    {
+        if (const R5900Context *running = m_eeScheduler->currentContext())
+            return *running;
+        if (const GuestThread *main = m_eeScheduler->thread(EeScheduler::kMainThreadId))
+            return main->activeContext();
+    }
+    return m_cpuContext;
+}
+
+bool PS2Runtime::readDisplayExact(DisplayImage &out)
+{
+    // The gif arbiter is normally empty between guest dispatches; apply anything left so local
+    // memory is current.
+    m_gifArbiter.drain();
+    const bool field = (m_memory.gs().csr.load(std::memory_order_acquire) & 0x2000ull) != 0ull;
+    return m_gs.readDisplayExact(out, field);
+}
+
 void PS2Runtime::postEeEvent(EeEvent event)
 {
     m_eeScheduler->postEvent(event);

@@ -1478,6 +1478,12 @@ R5900Context *EeScheduler::currentContext()
     return self ? &self->activeContext() : nullptr;
 }
 
+const R5900Context *EeScheduler::currentContext() const
+{
+    const GuestThread *self = currentThread();
+    return self ? &self->activeContext() : nullptr;
+}
+
 uint8_t *EeScheduler::rdram() const noexcept
 {
     return m_rdram;

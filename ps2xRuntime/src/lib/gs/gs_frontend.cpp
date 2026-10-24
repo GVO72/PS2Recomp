@@ -145,6 +145,7 @@ void GS::reset()
     m_prmodecont = true;
     m_pabe = false;
     m_scanmsk = 0u;
+    m_displayReadout.reset();
     m_dimx = 0u;
     m_dthe = 0u;
     m_colclamp = 0u;
@@ -496,6 +497,37 @@ void GS::unlockDisplaySnapshot()
 uint32_t GS::getLastDisplayBaseBytes() const
 {
     return m_lastDisplayBaseBytes;
+}
+
+bool GS::readDisplayExact(DisplayImage &out, bool field)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    out = DisplayImage{};
+    if (!m_privRegs || !m_backend)
+    {
+        std::cerr << "[gs-readout] unsupported: the GS has no privileged registers or backend" << std::endl;
+        return false;
+    }
+    m_backend->Flush();
+    m_backend->Sync(GSSyncReason::Presentation);
+
+    GSDisplayRegs regs;
+    regs.pmode = m_privRegs->pmode;
+    regs.smode1 = m_privRegs->smode1;
+    regs.smode2 = m_privRegs->smode2;
+    regs.syncv = m_privRegs->syncv;
+    regs.dispfb[0] = m_privRegs->dispfb1;
+    regs.dispfb[1] = m_privRegs->dispfb2;
+    regs.display[0] = m_privRegs->display1;
+    regs.display[1] = m_privRegs->display2;
+    regs.extbuf = m_privRegs->extbuf;
+    regs.extwrite = m_privRegs->extwrite;
+    regs.bgcolor = m_privRegs->bgcolor;
+    return m_displayReadout.read(
+        regs,
+        [this](uint32_t psm, uint32_t block, uint32_t fbw, uint32_t x, uint32_t y)
+        { return m_backend->ReadVram(psm, block, fbw, x, y); },
+        field, out);
 }
 
 void GS::refreshDisplaySnapshot()
@@ -1417,6 +1449,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         break;
     case GS_REG_SCANMSK:
         m_scanmsk = value;
+        m_displayReadout.noteScanmaskWrite(value);
         break;
     case GS_REG_DIMX:
         m_dimx = value;
