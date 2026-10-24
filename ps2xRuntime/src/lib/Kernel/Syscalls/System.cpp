@@ -1,8 +1,67 @@
 #include "Common.h"
 #include "System.h"
+#include <mutex>
+#include <set>
+#include <tuple>
 
 namespace ps2_syscalls
 {
+    namespace
+    {
+        // Values the BIOS kernel's SetGsCrt leaves in the GS privileged registers for
+        // interlaced NTSC (mode 2) and PAL (mode 3), as observed in PCSX2 runs. They are
+        // hardware timing values, not game data. SMODE1 differs between the two only in
+        // CMOD (bits 13-14: 2 = NTSC, 3 = PAL); no field follows interlace or ffmd, those
+        // only reach SMODE2.
+        struct GsCrtTiming
+        {
+            uint32_t mode;
+            uint64_t smode1;
+            uint64_t srfsh;
+            uint64_t synch1;
+            uint64_t synch2;
+            uint64_t syncv;
+        };
+
+        constexpr GsCrtTiming kGsCrtInterlacedTimings[] = {
+            {2u, 0x0000000740814504ull, 0x8ull, 0x0007f5b61f06f040ull, 0x000000000033a4d8ull, 0x00c7800601a01801ull},
+            {3u, 0x0000000740816504ull, 0x8ull, 0x0007f5c21fc83030ull, 0x00000000003484bcull, 0x00a9000502101401ull},
+        };
+
+        const GsCrtTiming *findGsCrtTiming(uint32_t interlaced, uint32_t mode)
+        {
+            if (interlaced != 1u)
+            {
+                return nullptr;
+            }
+            for (const GsCrtTiming &t : kGsCrtInterlacedTimings)
+            {
+                if (t.mode == mode)
+                {
+                    return &t;
+                }
+            }
+            return nullptr;
+        }
+
+        void logUnsupportedGsCrtOnce(uint32_t interlaced, uint32_t mode, uint32_t ffmd)
+        {
+            static std::mutex mutex;
+            static std::set<std::tuple<uint32_t, uint32_t, uint32_t>> seen;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!seen.emplace(interlaced, mode, ffmd).second)
+                {
+                    return;
+                }
+            }
+            std::cerr << "[SetGsCrt] unsupported mode (interlace=" << interlaced
+                      << ", mode=0x" << std::hex << mode << std::dec
+                      << ", ffmd=" << ffmd
+                      << "): SMODE1/SRFSH/SYNC registers left unchanged" << std::endl;
+        }
+    } // namespace
+
     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
@@ -17,6 +76,22 @@ namespace ps2_syscalls
                 ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
 
             gs.smode2 = smode2;
+
+            if (const GsCrtTiming *timing = findGsCrtTiming(static_cast<uint32_t>(interlaced),
+                                                            static_cast<uint32_t>(videoMode)))
+            {
+                gs.smode1 = timing->smode1;
+                gs.srfsh = timing->srfsh;
+                gs.synch1 = timing->synch1;
+                gs.synch2 = timing->synch2;
+                gs.syncv = timing->syncv;
+            }
+            else
+            {
+                logUnsupportedGsCrtOnce(static_cast<uint32_t>(interlaced),
+                                        static_cast<uint32_t>(videoMode),
+                                        static_cast<uint32_t>(frameMode) & 0x1u);
+            }
 
             // Keep CRT1 enabled after the BIOS syscall selects a display mode.
             if ((gs.pmode & 0x3ull) == 0ull)

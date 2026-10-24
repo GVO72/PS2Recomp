@@ -1,3 +1,5 @@
+#include <iostream>
+#include <sstream>
 #include "MiniTest.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_runtime.h"
@@ -518,6 +520,75 @@ void register_ps2_gs_tests()
                      "GsSetCrt should leave CRT1 enabled for presentation");
             t.Equals(getRegU32Test(ctx, 2), 0u,
                      "GsSetCrt should return success");
+        });
+
+        tc.Run("SetGsCrt writes BIOS CRTC timing for interlaced NTSC and PAL", [](TestCase &t)
+        {
+            struct Expect
+            {
+                uint32_t mode;
+                uint64_t smode1, synch1, synch2, syncv;
+            };
+            const Expect cases[] = {
+                {2u, 0x0000000740814504ull, 0x0007f5b61f06f040ull, 0x000000000033a4d8ull, 0x00c7800601a01801ull},
+                {3u, 0x0000000740816504ull, 0x0007f5c21fc83030ull, 0x00000000003484bcull, 0x00a9000502101401ull},
+            };
+            for (const Expect &e : cases)
+            {
+                for (uint32_t ffmd = 0; ffmd < 2; ++ffmd)
+                {
+                    PS2Runtime runtime;
+                    t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+                    std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+                    R5900Context ctx{};
+                    setRegU32(ctx, 4, 1u);
+                    setRegU32(ctx, 5, e.mode);
+                    setRegU32(ctx, 6, ffmd);
+                    SetGsCrt(rdram.data(), &ctx, &runtime);
+
+                    const auto &gs = runtime.memory().gs();
+                    t.Equals(gs.smode1, e.smode1, "SetGsCrt SMODE1");
+                    t.Equals(gs.smode2, static_cast<uint64_t>(1u | (ffmd << 1)), "SetGsCrt SMODE2 follows ffmd");
+                    t.Equals(gs.srfsh, 0x8ull, "SetGsCrt SRFSH");
+                    t.Equals(gs.synch1, e.synch1, "SetGsCrt SYNCH1");
+                    t.Equals(gs.synch2, e.synch2, "SetGsCrt SYNCH2");
+                    t.Equals(gs.syncv, e.syncv, "SetGsCrt SYNCV");
+                }
+            }
+        });
+
+        tc.Run("SetGsCrt logs and leaves SMODE1/SYNC unchanged for unsupported modes", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 0u); // non-interlaced
+            setRegU32(ctx, 5, 0x1234u);
+            setRegU32(ctx, 6, 1u);
+
+            auto &gs = runtime.memory().gs();
+            gs.smode1 = 0x11ull;
+            gs.srfsh = 0x22ull;
+            gs.synch1 = 0x33ull;
+            gs.synch2 = 0x44ull;
+            gs.syncv = 0x55ull;
+
+            std::ostringstream captured;
+            std::streambuf *old = std::cerr.rdbuf(captured.rdbuf());
+            SetGsCrt(rdram.data(), &ctx, &runtime);
+            std::cerr.rdbuf(old);
+
+            t.Equals(gs.smode1, 0x11ull, "unsupported mode keeps SMODE1");
+            t.Equals(gs.srfsh, 0x22ull, "unsupported mode keeps SRFSH");
+            t.Equals(gs.synch1, 0x33ull, "unsupported mode keeps SYNCH1");
+            t.Equals(gs.synch2, 0x44ull, "unsupported mode keeps SYNCH2");
+            t.Equals(gs.syncv, 0x55ull, "unsupported mode keeps SYNCV");
+            t.Equals(gs.smode2, 0x2ull, "unsupported mode still sets SMODE2");
+            t.IsTrue(captured.str().find("[SetGsCrt] unsupported mode") != std::string::npos,
+                     "unsupported mode should log");
+            t.IsTrue(captured.str().find("left unchanged") != std::string::npos,
+                     "log should say registers left unchanged");
         });
 
         tc.Run("sceGsSetDefDBuffDc seeds display envs and swap applies the selected page", [](TestCase &t)
