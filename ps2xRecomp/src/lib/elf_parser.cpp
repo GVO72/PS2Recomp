@@ -765,6 +765,32 @@ namespace
         return trackedGprs;
     }
 
+    // Like PropagateTrackedGprs, for registers that hold a complete code address.
+    // EE code often packs two 32-bit pointers into one 64-bit register so a
+    // single SD fills two adjacent fields: DSLL32 by 0 moves one into the upper
+    // half, DSRL32 by 0 zero-extends the other, and OR combines them. The
+    // packed register still carries the address, so a later store of it is
+    // still a store of a code pointer.
+    uint32_t PropagateCodePointerGprs(uint32_t raw, uint32_t trackedGprs)
+    {
+        uint32_t carried = 0;
+        if (OPCODE(raw) == OPCODE_SPECIAL && RD(raw) != GPR_ZERO)
+        {
+            const uint32_t function = FUNCTION(raw);
+            const bool rsTracked = (trackedGprs & (1u << RS(raw))) != 0;
+            const bool rtTracked = (trackedGprs & (1u << RT(raw))) != 0;
+            if ((function == SPECIAL_DSLL32 || function == SPECIAL_DSRL32) && SA(raw) == 0 && rtTracked)
+            {
+                carried = 1u << RD(raw);
+            }
+            else if (function == SPECIAL_OR && (rsTracked || rtTracked))
+            {
+                carried = 1u << RD(raw);
+            }
+        }
+        return PropagateTrackedGprs(raw, trackedGprs) | carried;
+    }
+
     bool IsConditionalBranch(uint32_t raw)
     {
         switch (OPCODE(raw))
@@ -1007,7 +1033,7 @@ namespace
                 uint32_t delayRaw = 0;
                 if (ReadSectionWord(section, state.offset + MIPS_INSTRUCTION_SIZE, delayRaw))
                 {
-                    afterDelay = PropagateTrackedGprs(delayRaw, afterDelay);
+                    afterDelay = PropagateCodePointerGprs(delayRaw, afterDelay);
                 }
                 if ((afterDelay & kArgumentMask) != 0)
                 {
@@ -1026,7 +1052,7 @@ namespace
                 uint32_t delayRaw = 0;
                 if (ReadSectionWord(section, state.offset + MIPS_INSTRUCTION_SIZE, delayRaw))
                 {
-                    delayTracked = PropagateTrackedGprs(delayRaw, delayTracked);
+                    delayTracked = PropagateCodePointerGprs(delayRaw, delayTracked);
                 }
 
                 enqueue(PcRelativeBranchTargetOffset(state.offset, raw), delayTracked);
@@ -1040,7 +1066,7 @@ namespace
                 uint32_t delayRaw = 0;
                 if (ReadSectionWord(section, state.offset + MIPS_INSTRUCTION_SIZE, delayRaw))
                 {
-                    delayTracked = PropagateTrackedGprs(delayRaw, delayTracked);
+                    delayTracked = PropagateCodePointerGprs(delayRaw, delayTracked);
                 }
 
                 uint32_t targetOffset = 0;
@@ -1073,7 +1099,7 @@ namespace
                 continue;
             }
 
-            const uint32_t nextTracked = PropagateTrackedGprs(raw, state.trackedGprs);
+            const uint32_t nextTracked = PropagateCodePointerGprs(raw, state.trackedGprs);
             enqueue(state.offset + MIPS_INSTRUCTION_SIZE, nextTracked);
         }
 
