@@ -1209,7 +1209,8 @@ namespace
     {
         for (const auto &section : sections)
         {
-            if (!section.isCode || !section.data || section.size < (2u * MIPS_INSTRUCTION_SIZE))
+            if (!section.isCode || section.isWritableCode || !section.data ||
+                section.size < (2u * MIPS_INSTRUCTION_SIZE))
             {
                 continue;
             }
@@ -1444,8 +1445,9 @@ namespace
 
         for (const auto &section : sections)
         {
-            if (!section.isData || section.isCode || section.isBSS ||
-                !section.data || section.size < MIPS_INSTRUCTION_SIZE)
+            // A writable executable section is scanned like data: it can hold pointer tables.
+            if ((section.isCode && !section.isWritableCode) || (!section.isData && !section.isWritableCode) ||
+                section.isBSS || !section.data || section.size < MIPS_INSTRUCTION_SIZE)
             {
                 continue;
             }
@@ -1598,7 +1600,8 @@ namespace
 
         for (const auto &section : sections)
         {
-            if (!section.isCode || !section.data || section.size < (2u * kLeafThunkBytes))
+            if (!section.isCode || section.isWritableCode || !section.data ||
+                section.size < (2u * kLeafThunkBytes))
             {
                 continue;
             }
@@ -1645,7 +1648,10 @@ namespace
         const auto &sections = parser->getSections();
         for (const auto &section : sections)
         {
-            if (!section.isCode || !section.data || section.size < MIPS_INSTRUCTION_SIZE)
+            // Words of a writable executable section are not assumed to be instructions, so a
+            // JAL-shaped word in one is not a call. Only a JAL from elsewhere starts code in it.
+            if (!section.isCode || section.isWritableCode || !section.data ||
+                section.size < MIPS_INSTRUCTION_SIZE)
             {
                 continue;
             }
@@ -1675,9 +1681,27 @@ namespace
             }
         }
 
+        // Only a direct call (or the entry point) proves code in a writable executable
+        // section: an address built in a register or stored in a table that points into a
+        // writable section is far more often a data or copy-source pointer.
+        const std::unordered_set<uint32_t> directStarts = starts;
+
         ScanMaterializedCodeAddresses(sections, starts);
         ScanDataFunctionPointerTables(sections, starts);
         ScanAdjacentLeafThunkRuns(sections, starts);
+
+        for (auto it = starts.begin(); it != starts.end();)
+        {
+            const ps2recomp::Section *section = FindCodeSectionByAddress(sections, *it);
+            if (section && section->isWritableCode && !directStarts.contains(*it))
+            {
+                it = starts.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
 
         std::vector<uint32_t> sortedStarts(starts.begin(), starts.end());
         std::sort(sortedStarts.begin(), sortedStarts.end());
@@ -2352,6 +2376,7 @@ namespace ps2recomp
             section.isData = isDataSection(psec);
             section.isBSS = (psec->get_type() == ELFIO::SHT_NOBITS);
             section.isReadOnly = !(psec->get_flags() & ELFIO::SHF_WRITE);
+            section.isWritableCode = section.isCode && !section.isReadOnly;
 
             if (psec->get_size() > 0 && psec->get_type() != ELFIO::SHT_NOBITS)
             {
@@ -2360,6 +2385,12 @@ namespace ps2recomp
             else
             {
                 section.data = nullptr;
+            }
+
+            if (section.isWritableCode && m_reporter)
+            {
+                m_reporter->info("elf", "Writable executable section " + section.name +
+                                            " treated as data; a function starts in it only at a direct call target.");
             }
 
             m_sections.push_back(section);

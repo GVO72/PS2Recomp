@@ -101,6 +101,18 @@ namespace ps2recomp
         std::cout << "Extracted " << m_context.sections.size() << " sections" << std::endl;
         std::cout << "Extracted " << m_context.relocations.size() << " relocations" << std::endl;
 
+        for (const auto &section : m_context.sections)
+        {
+            if (!section.isWritableCode)
+            {
+                continue;
+            }
+
+            std::cout << "Writable executable section treated as data (functions only at direct call targets): "
+                      << section.name << " " << formatAddress(section.address) << "-"
+                      << formatAddress(section.address + section.size) << std::endl;
+        }
+
         return true;
     }
 

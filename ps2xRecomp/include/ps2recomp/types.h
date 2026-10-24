@@ -123,6 +123,11 @@ namespace ps2recomp
         bool isBSS;
         bool isReadOnly;
         uint8_t *data;
+        // SHF_WRITE + SHF_EXECINSTR (a "WAX" section). Such a section usually holds a mix of
+        // data and code that is copied elsewhere before it runs, so its words are not all
+        // instructions. isCode stays true so addresses in it are still valid call targets;
+        // discovery treats it as data and starts a function in it only at a direct call target.
+        bool isWritableCode = false;
     };
 
     // Relocation information

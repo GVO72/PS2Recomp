@@ -4,6 +4,12 @@
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/types.h"
 
+#include <elfio/elfio.hpp>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <filesystem>
 #include <unordered_map>
 #include <vector>
 
@@ -17,6 +23,73 @@ namespace
         inst.address = address;
         inst.opcode = opcode;
         return inst;
+    }
+
+    // .text (RX) plus a .data section that is writable and executable ("WAX"):
+    //   0x00100000 jal 0x00200100 (a function inside the WAX section), then a return
+    //   0x00100010 and 0x00100020 leaf thunks right after a return, referenced only by
+    //              a pointer table in the WAX section
+    //   0x00100040 a leaf that only a JAL-shaped data word in the WAX section names
+    //   0x00200000 the pointer table (its third entry points back into the section), then words that do not decode as instructions
+    //   0x00200100 a function reached by the JAL above
+    bool writeElfWithWritableExecutableSection(const std::filesystem::path &elfPath)
+    {
+        ELFIO::elfio writer;
+        writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+        writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+        writer.set_type(ELFIO::ET_EXEC);
+        writer.set_machine(ELFIO::EM_MIPS);
+        writer.set_entry(0x00100000u);
+
+        std::array<uint32_t, 32> textWords{};
+        textWords[0] = 0x0C080040u; // jal 0x00200100
+        textWords[1] = 0x00000000u; // nop
+        textWords[2] = 0x03E00008u; // jr ra
+        textWords[3] = 0x00000000u; // nop
+        textWords[4] = 0x03E00008u; // thunk at 0x00100010: jr ra
+        textWords[5] = 0x00000000u;
+        textWords[8] = 0x03E00008u; // thunk at 0x00100020: jr ra
+        textWords[9] = 0x00000000u;
+        textWords[16] = 0x03E00008u; // leaf at 0x00100040: jr ra
+        textWords[17] = 0x00000000u;
+
+        ELFIO::section *text = writer.sections.add(".text");
+        text->set_type(ELFIO::SHT_PROGBITS);
+        text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+        text->set_addr_align(4);
+        text->set_address(0x00100000u);
+        text->set_data(reinterpret_cast<const char *>(textWords.data()), textWords.size() * sizeof(uint32_t));
+
+        std::array<uint32_t, 128> dataWords{};
+        dataWords[0] = 0x00100010u; // pointer table
+        dataWords[1] = 0x00100020u;
+        dataWords[2] = 0x00200180u; // points into the section: a table does not prove code there
+        dataWords[4] = 0xFFFFFFFFu; // not instructions
+        dataWords[5] = 0xFFFF0000u;
+        dataWords[6] = 0x7C7C7C7Cu;
+        dataWords[7] = 0x0C040010u; // JAL-shaped data word naming the leaf at 0x00100040
+        dataWords[8] = 0xFFFFFFFFu;
+        dataWords[9] = 0xEFEFEFEFu;
+        dataWords[64] = 0x03E00008u; // function at 0x00200100: jr ra
+        dataWords[65] = 0x00000000u;
+        dataWords[96] = 0x03E00008u; // return at 0x00200180, named only by the table above
+        dataWords[97] = 0x00000000u;
+
+        ELFIO::section *data = writer.sections.add(".data");
+        data->set_type(ELFIO::SHT_PROGBITS);
+        data->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE | ELFIO::SHF_EXECINSTR);
+        data->set_addr_align(4);
+        data->set_address(0x00200000u);
+        data->set_data(reinterpret_cast<const char *>(dataWords.data()), dataWords.size() * sizeof(uint32_t));
+
+        ELFIO::segment *segment = writer.segments.add();
+        segment->set_type(ELFIO::PT_LOAD);
+        segment->set_flags(ELFIO::PF_R | ELFIO::PF_W | ELFIO::PF_X);
+        segment->set_align(0x1000);
+        segment->add_section_index(text->get_index(), text->get_addr_align());
+        segment->add_section_index(data->get_index(), data->get_addr_align());
+
+        return writer.save(elfPath.string());
     }
 }
 
@@ -237,4 +310,58 @@ void register_elf_analyzer_tests()
                 readWord);
             t.Equals(invalidTables.size(), static_cast<size_t>(0),
                      "bounds over guard limit should not produce a jump table"); }); });
+
+    MiniTest::Case("ElfAnalyzerWritableExecutableSection", [](TestCase &tc)
+                   {
+                       tc.Run("writable executable section is scanned for pointers and not decoded as code", [](TestCase &t)
+                              {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-wax-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeElfWithWritableExecutableSection(elfPath);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfAnalyzer analyzer(elfPath.string());
+            const bool analyzeOk = analyzer.analyze();
+            t.IsTrue(analyzeOk, "generated ELF should analyze");
+            if (analyzeOk)
+            {
+                const auto &functions = analyzer.getFunctions();
+                auto hasStart = [&functions](uint32_t start)
+                {
+                    return std::any_of(functions.begin(), functions.end(),
+                                       [start](const Function &function)
+                                       { return function.start == start; });
+                };
+
+                t.IsTrue(hasStart(0x00100000u), "the entry point should be a function");
+                t.IsTrue(hasStart(0x00100010u),
+                         "a thunk named only by a pointer table in a writable executable section should be discovered");
+                t.IsTrue(hasStart(0x00100020u),
+                         "the second thunk of that pointer table should be discovered");
+                t.IsTrue(hasStart(0x00200100u),
+                         "a function in a writable executable section reached by a JAL from .text should be kept");
+                t.IsFalse(hasStart(0x00100040u),
+                          "a JAL-shaped data word in a writable executable section must not name a function");
+
+                size_t startsInWax = 0;
+                for (const Function &function : functions)
+                {
+                    if (function.start >= 0x00200000u && function.start < 0x00200200u)
+                    {
+                        ++startsInWax;
+                    }
+                }
+                t.Equals(startsInWax, static_cast<size_t>(1),
+                         "only the reached function in a writable executable section should be a function");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError); }); });
 }

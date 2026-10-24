@@ -448,7 +448,7 @@ namespace ps2recomp
 
             for (const Section &section : sections)
             {
-                if (!section.isCode || section.data == nullptr || section.size < 4)
+                if (!section.isCode || section.isWritableCode || section.data == nullptr || section.size < 4)
                 {
                     continue;
                 }
