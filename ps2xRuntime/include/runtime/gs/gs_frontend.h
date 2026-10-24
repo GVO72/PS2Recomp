@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "runtime/gs/gs_backend.h"
+#include "runtime/gs/gs_display_readout.h"
 
 struct GSDebugSnapshot
 {
@@ -145,6 +146,18 @@ public:
 
     void refreshDisplaySnapshot();
 
+    // The exact display read-out (gs_display_readout.h): the image PCSX2 would show for the
+    // current privileged registers and local memory, with `field` = CSR.FIELD. Unlike the
+    // window's presentation path (lockDisplaySnapshot and friends) it has no heuristics and no
+    // size cap. Drawing is synchronous: GIF packets are applied to local memory on the calling
+    // thread as they are submitted, and the backend is flushed here for backends that defer.
+    // Call it on the game thread, once per vsync, in order (it carries CRTC state from vsync to
+    // vsync). Returns false after logging "[gs-readout] unsupported ..." for a state it does not
+    // reproduce, or if the GS has no privileged registers; `out` is then blank.
+    bool readDisplayExact(DisplayImage &out, bool field);
+    const uint8_t *localMemory() const { return m_localMemoryStorage; }
+    uint32_t localMemorySize() const { return m_localMemorySize; }
+
     void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
     uint32_t ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
 
@@ -241,6 +254,7 @@ private:
     uint64_t m_debugLastVsyncTick = UINT64_MAX;
     bool m_debugHistoryPaused = true;
 
+    GSDisplayReadout m_displayReadout;
     std::unique_ptr<GSRasterBackend> m_backend;
 };
 

@@ -343,6 +343,23 @@ public:
     void setVSyncObserver(VSyncObserver observer);
     const VSyncObserver &vsyncObserver() const;
 
+    // Read access to the state a checkpoint dump needs. Valid only inside the vsync observer (or
+    // once run() has returned): the game thread owns all of it while it runs, and the observer is
+    // the one point at which every register has been written back.
+    //  - observedEeContext(): the context of the guest thread that was running when the
+    //    observer fired (an interrupt or callback's context if one was active), else the main
+    //    thread's context, else cpu(). It holds GPR, HI/LO and HI1/LO1, SA, PC, COP0, FPU
+    //    registers, FCR31 and the accumulator, and the VU0 macro registers (vu0_*, vi, cop2_ccr).
+    //  - memory().getRDRAM() (32 MB), getScratchpad() (16 KB), getVU0Code() / getVU0Data(),
+    //    getGSVRAM() (4 MB), memory().gs() (the GS privileged registers): const accessors.
+    //  - readIopMemory(0, buf, 2 MB): the IOP's RAM.
+    const R5900Context &observedEeContext() const;
+
+    // The exact display read-out for the current vsync (GS::readDisplayExact, with the field
+    // taken from CSR.FIELD). Valid only inside the vsync observer, which runs on the game thread
+    // with no GIF packet pending; any packet still queued is applied first.
+    bool readDisplayExact(DisplayImage &out);
+
     bool initialize(const char *title = "PS2 Game");
     bool syncCoreSubsystems();
     bool loadELF(const std::string &elfPath);

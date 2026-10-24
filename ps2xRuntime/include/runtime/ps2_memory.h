@@ -274,8 +274,11 @@ public:
 
     // Memory access methods
     uint8_t *getRDRAM() { return m_rdram; }
+    const uint8_t *getRDRAM() const { return m_rdram; }              // 32 MB
     uint8_t *getScratchpad() { return m_scratchpad; }
+    const uint8_t *getScratchpad() const { return m_scratchpad; }    // 16 KB
     uint8_t *getIOPRAM() { return iop_ram; }
+    const uint8_t *getIOPRAM() const { return iop_ram; } // not the IOP subsystem's RAM: see PS2Runtime::readIopMemory
     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
     uint64_t gifCopyCount() const { return m_gifCopyCount.load(std::memory_order_relaxed); }
     uint64_t gsWriteCount() const { return m_gsWriteCount.load(std::memory_order_relaxed); }

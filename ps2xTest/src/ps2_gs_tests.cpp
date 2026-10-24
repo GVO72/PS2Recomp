@@ -4629,4 +4629,287 @@ void register_ps2_gs_tests()
                      "second T4HL transfer to a different DBP should be byte-correct, proving the discarded excess bytes from the first transfer did not leak into subsequent transfer state");
         });
     });
+
+    // Exact display read-out (gs_display_readout.cpp). Every expectation below is derived by hand
+    // from the PCSX2 v2.8.2 path named in the comment above each case, not from the code under
+    // test. The fixture is a NTSC GS (SMODE1.CMOD = 2) with the 64 x 32 test image at FBP 0.
+    MiniTest::Case("PS2GSReadout", [](TestCase &tc)
+    {
+        struct Fixture
+        {
+            std::vector<uint8_t> vram = std::vector<uint8_t>(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            GS gs;
+
+            Fixture()
+            {
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                regs.smode1 = 2ull << 13; // CMOD = 2: NTSC
+                regs.display2 = display(642, 25, 3, 0, 256, 32); // 64 x 32 pixels, MAGH = 3
+                regs.dispfb2 = dispfb(0, 2, GS_PSM_CT32, 0, 0);
+                regs.pmode = 2ull; // EN2
+            }
+
+            static uint64_t display(uint64_t dx, uint64_t dy, uint64_t magh, uint64_t magv, uint64_t dwPlus1, uint64_t dhPlus1)
+            {
+                return dx | (dy << 12) | (magh << 23) | (magv << 27) | ((dwPlus1 - 1) << 32) | ((dhPlus1 - 1) << 44);
+            }
+            static uint64_t dispfb(uint64_t fbp, uint64_t fbw, uint64_t psm, uint64_t dbx, uint64_t dby)
+            {
+                return fbp | (fbw << 9) | (psm << 15) | (dbx << 32) | (dby << 43);
+            }
+            void fill(uint32_t psm, uint32_t fbp, uint32_t fbw, uint32_t w, uint32_t h, uint32_t (*pat)(uint32_t, uint32_t))
+            {
+                for (uint32_t y = 0; y < h; ++y)
+                    for (uint32_t x = 0; x < w; ++x)
+                        gs.WriteVram(psm, fbp << 5, fbw, x, y, pat(x, y));
+            }
+        };
+        auto px = [](const DisplayImage &img, uint32_t x, uint32_t y, int c)
+        { return img.rgb[(static_cast<size_t>(y) * img.width + x) * 3u + c]; };
+
+        // GSRenderer::Merge -> GetOutput -> ReadTexture32; GSDevice::DoMerge copies circuit 2.
+        tc.Run("readout: one circuit, PSMCT32, exact pixels and size", [px](TestCase &t)
+        {
+            Fixture f;
+            f.fill(GS_PSM_CT32, 0, 2, 64, 32, [](uint32_t x, uint32_t y) { return (x * 3u + 1u) | ((y * 5u + 2u) << 8) | (((x ^ y) * 7u + 3u) << 16) | 0x80000000u; });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            t.IsFalse(img.blank, "not blank");
+            t.Equals(img.width, 64u, "width is the display rectangle width (DW+1)/4");
+            t.Equals(img.height, 32u, "height is DH+1");
+            t.Equals(img.rgb.size(), static_cast<size_t>(64 * 32 * 3), "RGB bytes, alpha dropped");
+            bool ok = true;
+            for (uint32_t y = 0; y < 32; ++y)
+                for (uint32_t x = 0; x < 64; ++x)
+                    ok = ok && px(img, x, y, 0) == ((x * 3u + 1u) & 255u) && px(img, x, y, 1) == ((y * 5u + 2u) & 255u) &&
+                         px(img, x, y, 2) == (((x ^ y) * 7u + 3u) & 255u);
+            t.IsTrue(ok, "every pixel is the framebuffer word's R, G, B");
+        });
+
+        // ReadTexture24 / Expand24To32: the low 24 bits; the high byte of the word is ignored.
+        tc.Run("readout: one circuit, PSMCT24", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.dispfb2 = Fixture::dispfb(0, 2, GS_PSM_CT24, 0, 0);
+            f.fill(GS_PSM_CT24, 0, 2, 64, 32, [](uint32_t x, uint32_t y) { return (x + 1u) | ((y + 2u) << 8) | ((x + y + 3u) << 16); });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            bool ok = img.width == 64 && img.height == 32;
+            for (uint32_t y = 0; ok && y < 32; ++y)
+                for (uint32_t x = 0; x < 64; ++x)
+                    ok = ok && px(img, x, y, 0) == x + 1 && px(img, x, y, 1) == y + 2 && px(img, x, y, 2) == x + y + 3;
+            t.IsTrue(ok, "CT24 pixels are the low 24 bits");
+        });
+
+        // ReadTexture16 / Expand16To32 (AEM = 0): channel = 5 bits << 3, no bit replication.
+        tc.Run("readout: one circuit, PSMCT16 and PSMCT16S", [px](TestCase &t)
+        {
+            for (uint32_t psm : {static_cast<uint32_t>(GS_PSM_CT16), static_cast<uint32_t>(GS_PSM_CT16S)})
+            {
+                Fixture f;
+                f.regs.dispfb2 = Fixture::dispfb(0, 2, psm, 0, 0);
+                f.fill(psm, 0, 2, 64, 32, [](uint32_t x, uint32_t y) { return ((x & 31u) | ((y & 31u) << 5) | (((x + y) & 31u) << 10) | 0x8000u); });
+                DisplayImage img;
+                t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+                bool ok = img.width == 64 && img.height == 32;
+                for (uint32_t y = 0; ok && y < 32; ++y)
+                    for (uint32_t x = 0; x < 64; ++x)
+                        ok = ok && px(img, x, y, 0) == ((x & 31u) << 3) && px(img, x, y, 1) == ((y & 31u) << 3) &&
+                             px(img, x, y, 2) == (((x + y) & 31u) << 3);
+                t.IsTrue(ok, "16-bit channels are 5 bits shifted left by 3");
+            }
+        });
+
+        // GSState::GSPCRTCRegs::SetRects (framebufferOffsets = DBX, DBY) and GetOutput's block-aligned read.
+        tc.Run("readout: DBX and DBY offset the framebuffer read", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.dispfb2 = Fixture::dispfb(0, 2, GS_PSM_CT32, 3, 5);
+            f.fill(GS_PSM_CT32, 0, 2, 128, 64, [](uint32_t x, uint32_t y) { return (x & 255u) | ((y & 255u) << 8) | 0x80000000u; });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            bool ok = img.width == 64 && img.height == 32;
+            for (uint32_t y = 0; ok && y < 32; ++y)
+                for (uint32_t x = 0; x < 64; ++x)
+                    ok = ok && px(img, x, y, 0) == x + 3 && px(img, x, y, 1) == y + 5;
+            t.IsTrue(ok, "pixel (x, y) is framebuffer pixel (x + DBX, y + DBY)");
+        });
+
+        // SetRects: renderWidth = (DW+1) / (MAGH+1), renderHeight = (DH+1) / (MAGV+1).
+        tc.Run("readout: MAGH and MAGV set the framebuffer rectangle", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.display2 = Fixture::display(642, 25, 7, 1, 512, 64); // MAGH = 7 (8x), MAGV = 1 (2x)
+            f.fill(GS_PSM_CT32, 0, 2, 64, 32, [](uint32_t x, uint32_t y) { return (x & 255u) | ((y & 255u) << 8) | 0x80000000u; });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            t.Equals(img.width, 64u, "(DW+1) / 8 = 64 pixels read; shown width min(64, (DW+1) / 4)");
+            t.Equals(img.height, 32u, "64 / 2 rows");
+            t.IsTrue(img.width == 64 && px(img, 63, 31, 0) == 63 && px(img, 63, 31, 1) == 31, "last pixel");
+        });
+
+        // Not reproduced: a 4:1 downscale lands destination pixel centres exactly on texel edges.
+        tc.Run("readout: an ambiguous nearest-sampling scale is refused, not guessed", [](TestCase &t)
+        {
+            Fixture f;
+            f.regs.display2 = Fixture::display(642, 25, 0, 0, 256, 32); // MAGH = 0: 256 pixels read, 64 shown
+            DisplayImage img;
+            t.IsFalse(f.gs.readDisplayExact(img, false), "read-out reports unsupported");
+            t.IsTrue(img.blank, "no image is returned");
+        });
+
+        // GSDevice::DoMerge with MMOD = 0: circuit 2 is copied, circuit 1 is blended over it with
+        // alpha = min(255, 2 * texel alpha). Values worked out by hand with rnd(t) = (t + 127) / 255:
+        // src 200 at alpha 0x40 (a = 128), dst 100: rnd(200*128) = 100, rnd(100*127) = 50 -> 150.
+        tc.Run("readout: two circuits, ALP blending with the source alpha (MMOD = 0)", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.pmode = 3ull; // EN1 | EN2
+            f.regs.display1 = f.regs.display2;
+            f.regs.dispfb1 = Fixture::dispfb(8, 2, GS_PSM_CT32, 0, 0);
+            f.fill(GS_PSM_CT32, 8, 2, 64, 32, [](uint32_t, uint32_t) { return 200u | (200u << 8) | (200u << 16) | (0x40u << 24); });
+            f.fill(GS_PSM_CT32, 0, 2, 64, 32, [](uint32_t, uint32_t) { return 100u | (100u << 8) | (100u << 16) | (0x80u << 24); });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            t.IsTrue(img.width == 64 && img.height == 32, "size");
+            t.Equals(static_cast<int>(px(img, 5, 5, 0)), 150, "blended with a = 128");
+            t.Equals(static_cast<int>(px(img, 5, 5, 2)), 150, "all channels");
+            // Alpha 0x80 doubles to 256 and clamps to 255: circuit 1 wins outright.
+            f.fill(GS_PSM_CT32, 8, 2, 64, 32, [](uint32_t, uint32_t) { return 200u | (200u << 8) | (200u << 16) | (0x80u << 24); });
+            t.IsTrue(f.gs.readDisplayExact(img, false), "second read-out succeeds");
+            t.Equals(static_cast<int>(px(img, 5, 5, 0)), 200, "alpha 0x80 is fully opaque");
+        });
+
+        // DoMerge with MMOD = 1: a = ALP. src 200, dst 100, ALP 64: rnd(200*64) = 50, rnd(100*191) = 75 -> 125.
+        tc.Run("readout: two circuits, MMOD = 1 uses ALP", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.pmode = 3ull | (1ull << 5) | (64ull << 8); // EN1 | EN2 | MMOD | ALP = 64
+            f.regs.display1 = f.regs.display2;
+            f.regs.dispfb1 = Fixture::dispfb(8, 2, GS_PSM_CT32, 0, 0);
+            f.fill(GS_PSM_CT32, 8, 2, 64, 32, [](uint32_t, uint32_t) { return 200u | (200u << 8) | (200u << 16); });
+            f.fill(GS_PSM_CT32, 0, 2, 64, 32, [](uint32_t, uint32_t) { return 100u | (100u << 8) | (100u << 16); });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            t.Equals(static_cast<int>(px(img, 9, 9, 1)), 125, "blended with a = ALP");
+        });
+
+        // GSRenderer::Merge: both circuits on the same source (FrameRectMatch) are read once, and
+        // the identical outputs are drawn once, as a copy: no blending, whatever the alpha.
+        tc.Run("readout: both circuits on one source are copied, not blended", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.pmode = 3ull;
+            f.regs.display1 = f.regs.display2;
+            f.regs.dispfb1 = f.regs.dispfb2;
+            f.fill(GS_PSM_CT32, 0, 2, 64, 32, [](uint32_t, uint32_t) { return 77u | (88u << 8) | (99u << 16); }); // alpha 0
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            t.IsTrue(px(img, 1, 1, 0) == 77 && px(img, 1, 1, 1) == 88 && px(img, 1, 1, 2) == 99, "plain copy");
+        });
+
+        // DoMerge with SLBG = 1: circuit 2 is replaced by BGCOLOR; circuit 1 is blended over it.
+        // src 200 at alpha 0x20 (a = 64) over background R = 10: rnd(200*64) = 50, rnd(10*191) = 7 -> 57.
+        tc.Run("readout: SLBG shows BGCOLOR instead of circuit 2", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.pmode = 3ull | (1ull << 7); // EN1 | EN2 | SLBG
+            f.regs.display1 = f.regs.display2;
+            f.regs.dispfb1 = Fixture::dispfb(8, 2, GS_PSM_CT32, 0, 0);
+            f.regs.bgcolor = 10ull | (20ull << 8) | (30ull << 16);
+            f.fill(GS_PSM_CT32, 8, 2, 64, 32, [](uint32_t, uint32_t) { return 200u | (200u << 8) | (200u << 16) | (0x20u << 24); });
+            f.fill(GS_PSM_CT32, 0, 2, 64, 32, [](uint32_t, uint32_t) { return 1u | (2u << 8) | (3u << 16) | (0x80u << 24); });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            t.Equals(static_cast<int>(px(img, 0, 0, 0)), 57, "R: 200 over background 10");
+            t.Equals(static_cast<int>(px(img, 0, 0, 1)), (200 * 64 + 127) / 255 + (20 * 191 + 127) / 255, "G: 200 over background 20");
+        });
+
+        // GSRenderer::Merge with only circuit 1 enabled: the circuit is blended over BGCOLOR, and a
+        // 16-bit pixel without bit 15 has alpha TA0 = 0, so it shows the background.
+        tc.Run("readout: circuit 1 alone blends over BGCOLOR (CT16 alpha bit)", [px](TestCase &t)
+        {
+            Fixture f;
+            f.regs.pmode = 1ull; // EN1
+            f.regs.display1 = f.regs.display2;
+            f.regs.dispfb1 = Fixture::dispfb(0, 2, GS_PSM_CT16, 0, 0);
+            f.regs.bgcolor = 40ull | (50ull << 8) | (60ull << 16);
+            f.fill(GS_PSM_CT16, 0, 2, 64, 32, [](uint32_t x, uint32_t) { return (x < 32u) ? (0x8000u | 0x1Fu) : 0x1Fu; });
+            DisplayImage img;
+            t.IsTrue(f.gs.readDisplayExact(img, false), "read-out succeeds");
+            t.IsTrue(px(img, 0, 0, 0) == 0xF8 && px(img, 0, 0, 1) == 0, "bit 15 set: TA1 = 0x80 doubles to opaque: the pixel");
+            t.IsTrue(px(img, 40, 0, 0) == 40 && px(img, 40, 0, 1) == 50 && px(img, 40, 0, 2) == 60, "bit 15 clear: alpha 0, the background");
+        });
+
+        // GSState::SetRects with FFMD && INT: half-height framebuffer read, doubled by the merge.
+        // InterlaceMode Off: Merge ignores the field, so both fields give the same image.
+        tc.Run("readout: interlaced FFMD = 0 and FFMD = 1, both fields", [px](TestCase &t)
+        {
+            for (int ffmd = 0; ffmd < 2; ++ffmd)
+            {
+                Fixture f;
+                f.regs.syncv = 1ull; // VFP odd: isReallyInterlaced
+                f.regs.smode2 = 1ull | (static_cast<uint64_t>(ffmd) << 1);
+                f.regs.display2 = Fixture::display(642, 50, 3, 0, 256, 64); // DY = 25 * 2 (interlaced)
+                f.fill(GS_PSM_CT32, 0, 2, 64, 64, [](uint32_t x, uint32_t y) { return (x & 255u) | ((y & 255u) << 8) | 0x80000000u; });
+                DisplayImage a, b;
+                t.IsTrue(f.gs.readDisplayExact(a, false), "even field read-out succeeds");
+                t.IsTrue(f.gs.readDisplayExact(b, true), "odd field read-out succeeds");
+                t.IsTrue(a.rgb == b.rgb && a.width == b.width && a.height == b.height, "the field does not change the image");
+                t.IsTrue(a.width == 64 && a.height == 64, "64 x 64 display");
+                bool ok = a.width == 64 && a.height == 64;
+                for (uint32_t y = 0; ok && y < 64; ++y)
+                    ok = ok && px(a, 7, y, 1) == (ffmd ? y / 2 : y);
+                t.IsTrue(ok, ffmd ? "FFMD = 1 reads 32 rows and shows each twice" : "FFMD = 0 reads all 64 rows");
+            }
+        });
+
+        // GSRenderer::Merge returns false: both circuits off; no usable framebuffer (FBW = 0).
+        tc.Run("readout: blank frames", [](TestCase &t)
+        {
+            {
+                Fixture f;
+                f.regs.pmode = 0ull;
+                DisplayImage img;
+                t.IsTrue(f.gs.readDisplayExact(img, false) && img.blank && img.width == 0 && img.height == 0 && img.rgb.empty(), "both circuits off");
+            }
+            {
+                Fixture f;
+                f.regs.dispfb2 = Fixture::dispfb(0, 0, GS_PSM_CT32, 0, 0); // FBW = 0, DW != 0
+                DisplayImage img;
+                t.IsTrue(f.gs.readDisplayExact(img, false) && img.blank, "FBW = 0 gives no texture");
+            }
+            {
+                Fixture f;
+                f.regs.dispfb2 = 0ull;
+                f.regs.display2 = 0ull; // FBW, DW, DH, MAGH all 0: the circuit counts as not set up
+                DisplayImage img;
+                t.IsTrue(f.gs.readDisplayExact(img, false) && img.blank, "circuit not set up");
+            }
+        });
+
+        // Refused states fail loudly.
+        tc.Run("readout: unsupported states return false", [](TestCase &t)
+        {
+            {
+                Fixture f;
+                f.regs.extwrite = 1ull;
+                DisplayImage img;
+                t.IsFalse(f.gs.readDisplayExact(img, false), "feedback merge (EXTWRITE.WRITE)");
+            }
+            {
+                Fixture f;
+                f.regs.smode1 = 1ull << 13; // CMOD = 1
+                DisplayImage img;
+                t.IsFalse(f.gs.readDisplayExact(img, false), "unknown video mode");
+            }
+            {
+                Fixture f;
+                f.regs.dispfb2 = Fixture::dispfb(0, 2, GS_PSM_T8, 0, 0);
+                DisplayImage img;
+                t.IsFalse(f.gs.readDisplayExact(img, false), "paletted display format");
+            }
+        });
+    });
 }
