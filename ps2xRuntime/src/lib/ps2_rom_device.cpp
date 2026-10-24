@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <string>
 #include <utility>
 
 namespace
@@ -60,6 +61,36 @@ namespace
 PS2RomDevice::PS2RomDevice()
 {
     mountBaseProfile();
+}
+
+bool PS2RomDevice::isValidRomVersion(std::string_view romver) noexcept
+{
+    if (romver.size() != 14u)
+        return false;
+    const auto isDigit = [](char c)
+    { return c >= '0' && c <= '9'; };
+    const auto isLetter = [](char c)
+    { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
+    for (size_t i = 0; i < romver.size(); ++i)
+    {
+        const bool letter = i == 4u || i == 5u;
+        if (letter ? !isLetter(romver[i]) : !isDigit(romver[i]))
+            return false;
+    }
+    return true;
+}
+
+bool PS2RomDevice::setRomVersion(std::string_view romver, std::string *error)
+{
+    if (!isValidRomVersion(romver))
+    {
+        if (error)
+            *error = "ROMVER '" + std::string(romver) + "' is not 4 digits, a region letter, a type letter and 8 digits";
+        return false;
+    }
+    m_romVersion = std::string(romver);
+    mountBaseProfile();
+    return true;
 }
 
 void PS2RomDevice::registerProfile(PS2RomProfile profile)
@@ -165,14 +196,22 @@ std::string PS2RomDevice::normalizePath(std::string_view path)
 
 void PS2RomDevice::mountBaseProfile()
 {
-    // TODO expose this to cmake
-    constexpr char romVersion[] = "0200AC20040614";
-    static_assert(sizeof(romVersion) - 1u == 14u);
-    m_files[normalizePath("ROMVER")] = std::vector<uint8_t>(romVersion, romVersion + 14u);
+    // The default is a US console (region letter A); setRomVersion() replaces it.
+    constexpr char defaultRomVersion[] = "0200AC20040614";
+    static_assert(sizeof(defaultRomVersion) - 1u == 14u);
+    const std::string_view romVersion = m_romVersion.empty() ? std::string_view(defaultRomVersion, 14u)
+                                                             : std::string_view(m_romVersion);
+    m_files[normalizePath("ROMVER")] = std::vector<uint8_t>(romVersion.begin(), romVersion.end());
 }
 
 void PS2RomDevice::mountFiles(const std::unordered_map<std::string, std::vector<uint8_t>> &files)
 {
+    const std::string romverPath = normalizePath("ROMVER");
     for (const auto &[path, bytes] : files)
-        m_files[normalizePath(path)] = bytes;
+    {
+        const std::string normalized = normalizePath(path);
+        if (normalized == romverPath && !m_romVersion.empty())
+            continue; // an explicitly set ROMVER wins over a profile's
+        m_files[normalized] = bytes;
+    }
 }

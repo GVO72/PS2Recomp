@@ -25,6 +25,16 @@ public:
 
     static void registerProfile(PS2RomProfile profile);
 
+    // True for a 14-character ROMVER: 4 digits (version), a region letter, a type letter and 8
+    // digits (build date), e.g. the layout of the BIOS ROM's ROMVER entry.
+    [[nodiscard]] static bool isValidRomVersion(std::string_view romver) noexcept;
+
+    // Sets the ROMVER that rom0:ROMVER returns, in place of the built-in default. It survives
+    // configure() and wins over a profile's own ROMVER. Returns false (and sets *error) when
+    // the shape is invalid; the current value then stays.
+    bool setRomVersion(std::string_view romver, std::string *error = nullptr);
+    [[nodiscard]] bool hasRomVersionOverride() const noexcept { return !m_romVersion.empty(); }
+
     bool configure(const ps2x::iop::GameIdentity &identity, std::string *error = nullptr);
     [[nodiscard]] bool readFile(std::string_view ps2Path, std::vector<uint8_t> &bytes) const;
     [[nodiscard]] bool fileSize(std::string_view ps2Path, uint64_t &size) const;
@@ -40,4 +50,5 @@ private:
     std::unordered_map<std::string, std::vector<uint8_t>> m_files;
     std::string m_activeProfile;
     std::string m_activeProvider;
+    std::string m_romVersion; // empty: the built-in default
 };

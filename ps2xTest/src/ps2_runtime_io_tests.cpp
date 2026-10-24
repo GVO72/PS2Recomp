@@ -201,6 +201,43 @@ void register_ps2_runtime_io_tests()
             t.Equals(getRegS32(&test.ctx, 2), 0, "fioClose should release the ROMVER descriptor");
         });
 
+        tc.Run("ROM0 ROMVER can be set, survives configure and rejects a bad shape", [](TestCase &t)
+        {
+            TestContext test;
+            constexpr char kSetRomVersion[] = "0200EC20040614";
+            t.IsTrue(test.runtime.setRomVersion(kSetRomVersion), "a well-formed ROMVER should be accepted");
+            t.IsTrue(!test.runtime.setRomVersion("0200EC2004061"), "a short ROMVER should be rejected");
+            t.IsTrue(!test.runtime.setRomVersion("02X0EC20040614"), "a non-digit version should be rejected");
+            t.IsTrue(!test.runtime.setRomVersion("020000020040614"), "a long ROMVER should be rejected");
+            t.IsTrue(!test.runtime.setRomVersion("0200E.20040614"), "a non-letter type should be rejected");
+            t.IsTrue(!test.runtime.setRomVersion("0200EC2004061X"), "a non-digit date should be rejected");
+
+            std::string error;
+            t.IsTrue(test.runtime.romDevice().configure({"no_such_game.elf", 0u, 0u}, &error),
+                     "configure should succeed without a matching profile");
+
+            std::vector<uint8_t> bytes;
+            t.IsTrue(test.runtime.romDevice().readFile("rom0:ROMVER", bytes), "rom0:ROMVER should exist");
+            t.IsTrue(std::string(bytes.begin(), bytes.end()) == kSetRomVersion,
+                     "rom0:ROMVER should return the value that was set, also after configure");
+
+            constexpr uint32_t kPathAddr = GUEST_STRING_AREA_START;
+            constexpr uint32_t kBufferAddr = GUEST_BUFFER_AREA_START;
+            writeGuestString(test.rdram.data(), kPathAddr, "rom0:ROMVER");
+            setRegU32(test.ctx, 4, kPathAddr);
+            setRegU32(test.ctx, 5, PS2_FIO_O_RDONLY);
+            fioOpen(test.rdram.data(), &test.ctx, &test.runtime);
+            const int32_t fd = getRegS32(&test.ctx, 2);
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            setRegU32(test.ctx, 5, kBufferAddr);
+            setRegU32(test.ctx, 6, 14u);
+            fioRead(test.rdram.data(), &test.ctx, &test.runtime);
+            t.IsTrue(std::memcmp(test.rdram.data() + kBufferAddr, kSetRomVersion, 14u) == 0,
+                     "the guest should read the set ROMVER through FileIO");
+            setRegU32(test.ctx, 4, static_cast<uint32_t>(fd));
+            fioClose(test.rdram.data(), &test.ctx, &test.runtime);
+        });
+
         tc.Run("ROM0 profiles can extend and override files without a BIOS", [](TestCase &t)
         {
             PS2RomProfile profile;

@@ -733,6 +733,17 @@ bool PS2Runtime::syncCoreSubsystems()
     return true;
 }
 
+bool PS2Runtime::setRomVersion(std::string_view romver)
+{
+    std::string error;
+    if (!m_romDevice.setRomVersion(romver, &error))
+    {
+        std::cerr << "[ROM0] " << error << std::endl;
+        return false;
+    }
+    return true;
+}
+
 void PS2Runtime::setRunMode(const RunMode &mode)
 {
     m_runMode = mode;
@@ -1016,6 +1027,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     identity.entryPoint = m_cpuContext.pc;
     identity.crc32 = elfCrc32;
     std::string romError;
+    if (m_runMode.deterministic && !m_romDevice.hasRomVersionOverride())
+    {
+        std::cerr << "[ROM0] deterministic mode: the US default ROMVER is in effect (no ROMVER set)" << std::endl;
+    }
     if (!m_romDevice.configure(identity, &romError))
     {
         std::cerr << "[ROM0] failed to configure profile: " << romError << std::endl;

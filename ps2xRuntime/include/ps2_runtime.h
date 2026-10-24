@@ -552,6 +552,9 @@ public:
     inline const PSPadBackend &padBackend() const { return m_padBackend; }
     inline PS2RomDevice &romDevice() { return m_romDevice; }
     inline const PS2RomDevice &romDevice() const { return m_romDevice; }
+    // Sets the ROMVER that rom0:ROMVER reports (14 characters, e.g. the BIOS's). Call before
+    // loadELF. Returns false and logs when the shape is invalid.
+    bool setRomVersion(std::string_view romver);
     inline PS2Vfs &vfs() { return m_vfs; }
     inline const PS2Vfs &vfs() const { return m_vfs; }
 
