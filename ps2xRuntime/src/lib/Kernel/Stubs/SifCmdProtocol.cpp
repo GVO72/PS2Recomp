@@ -33,8 +33,6 @@ namespace ps2_stubs::sif_protocol
         struct Reply
         {
             std::vector<uint8_t> packet;
-            uint32_t extraDest = 0u;
-            std::vector<uint8_t> extra;
         };
 
         struct BoundServer
@@ -339,11 +337,6 @@ namespace ps2_stubs::sif_protocol
                 return; // the EE has not consumed the previous packet yet (psize != 0)
             reply = std::move(g_replies.front());
             g_replies.pop_front();
-            if (!reply.extra.empty())
-            {
-                if (uint8_t *extra = eeRam(rdram, reply.extraDest, reply.extra.size()))
-                    std::memcpy(extra, reply.extra.data(), reply.extra.size());
-            }
             std::memcpy(packetBuffer, reply.packet.data(), reply.packet.size());
         }
 
