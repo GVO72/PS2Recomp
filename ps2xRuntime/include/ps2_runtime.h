@@ -27,6 +27,7 @@
 #include "ps2_log.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
+#include "runtime/ps2_console.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_vu1.h"
@@ -436,6 +437,15 @@ public:
     // FILEIO, the tty device) to this file; empty stops it. Lines always go to
     // stdout too, prefixed with "[IOP tty] ".
     static void setIopConsolePath(const std::filesystem::path &path);
+
+    // Receives every completed console line of the guest, tagged with the processor that
+    // printed it (runtime/ps2_console.h lists which output path is which). Global, like
+    // setIopConsolePath; an empty function stops it. The sink also sees the lines setIopConsolePath
+    // writes. Set it before run(); it is called under a lock on the thread that printed.
+    static void setConsoleSink(ConsoleSink sink);
+    // Completes a trailing partial line of each source (without a '\n') through the sink. The
+    // runner calls it after run() so that text the guest never ended with a newline is kept.
+    static void flushConsole();
 
     // Where handleIopRpcWithSendData presents the call data to IOP services:
     // outside EE RAM, so it never shadows guest memory.

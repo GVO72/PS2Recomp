@@ -551,6 +551,7 @@ namespace ps2_stubs
                     std::cerr << "PS2 printf logging suppressed after " << kMaxPrintfLogs << " lines" << std::endl;
                 }
             });
+            ps2_console::write(ConsoleSource::Iop, rendered);
             ret = static_cast<int>(rendered.size());
         }
         else
@@ -676,8 +677,9 @@ namespace ps2_stubs
 
         if (hostStr)
         {
-            result = std::puts(hostStr); // std::puts adds a newline
-            std::fflush(stdout);         // Ensure output appears
+            // The guest's stdout is the IOP's FILEIO stdout: a line of the IOP console.
+            ps2_console::write(ConsoleSource::Iop, std::string(hostStr) + "\n");
+            result = 0;
         }
         else
         {

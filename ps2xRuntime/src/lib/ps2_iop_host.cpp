@@ -3,6 +3,7 @@
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "Kernel/Stubs/SIF.h"
+#include "runtime/ps2_console.h"
 #include "runtime/ps2_memory.h"
 #include "Kernel/Stubs/MemoryCard.h"
 #include "Kernel/Syscalls/Common.h"
@@ -543,57 +544,9 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
                                          packetSize);
 }
 
-namespace
-{
-    std::mutex g_iopConsoleMutex;
-    std::string g_iopConsolePending;
-    std::ofstream g_iopConsoleFile;
-
-    void emitIopConsoleLineLocked()
-    {
-        std::cout << "[IOP tty] " << g_iopConsolePending << std::endl;
-        if (g_iopConsoleFile.is_open())
-        {
-            // Flushed per line: the runner may end the process with _Exit.
-            g_iopConsoleFile << g_iopConsolePending << '\n';
-            g_iopConsoleFile.flush();
-        }
-        g_iopConsolePending.clear();
-    }
-}
-
-void PS2Runtime::setIopConsolePath(const std::filesystem::path &path)
-{
-    std::lock_guard<std::mutex> lock(g_iopConsoleMutex);
-    if (g_iopConsoleFile.is_open())
-    {
-        g_iopConsoleFile.close();
-    }
-    g_iopConsoleFile.clear();
-    if (!path.empty())
-    {
-        g_iopConsoleFile.open(path, std::ios::binary | std::ios::trunc);
-        if (!g_iopConsoleFile.is_open())
-        {
-            std::cerr << "[ps2xIOP:warning] cannot write the IOP console to " << path << std::endl;
-        }
-    }
-}
-
 void PS2IopHostAdapter::writeConsole(std::string_view text)
 {
-    std::lock_guard<std::mutex> lock(g_iopConsoleMutex);
-    for (const char c : text)
-    {
-        if (c == '\n')
-        {
-            emitIopConsoleLineLocked();
-        }
-        else
-        {
-            g_iopConsolePending.push_back(c);
-        }
-    }
+    ps2_console::write(ConsoleSource::Iop, text);
 }
 
 // IOP file access goes through the same file layer, mounts and ROM device as

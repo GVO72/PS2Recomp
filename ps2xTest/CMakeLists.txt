@@ -29,6 +29,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_runtime_kernel_tests.cpp
     src/ps2_runtime_interrupt_tests.cpp
     src/ps2_runtime_deterministic_tests.cpp
+    src/ps2_console_tests.cpp
     src/ps2_memory_tests.cpp
     src/ps2_vu1_tests.cpp
     src/ps2_vu_tests.cpp

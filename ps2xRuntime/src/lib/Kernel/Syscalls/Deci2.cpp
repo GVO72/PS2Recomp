@@ -204,6 +204,7 @@ namespace ps2_syscalls
             const uint32_t textAddr = args[0];
             const std::string text = readGuestCStringBounded(rdram, textAddr, kMaxDeci2KputsBytes);
 
+            ps2_console::write(ConsoleSource::Ee, text);
             logDeci2Text("[Deci2Call:kputs] ", text);
             setReturnS32(ctx, static_cast<int32_t>(text.size()));
             return;
