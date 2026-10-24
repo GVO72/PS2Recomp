@@ -607,9 +607,13 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpcWithSendData(uint8_t *rdram, R5900C
     request.callToken = scope.token();
     request.send = {kIopRpcStagedSendAddress, static_cast<uint32_t>(sendData.size())};
     m_iopHost->stageGuestRead(kIopRpcStagedSendAddress, sendData);
-    ps2x::iop::RpcResult result = m_iopSubsystem->handleRpc(request);
-    m_iopHost->clearStagedGuestRead();
-    return result;
+    // Cleared on every exit, exceptions included, so the window never outlives the call.
+    struct ClearStagedRead
+    {
+        PS2IopHostAdapter &host;
+        ~ClearStagedRead() { host.clearStagedGuestRead(); }
+    } clearStagedRead{*m_iopHost};
+    return m_iopSubsystem->handleRpc(request);
 }
 
 void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
