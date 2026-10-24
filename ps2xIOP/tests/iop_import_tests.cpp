@@ -8,6 +8,8 @@
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <chrono>
 #include <cstring>
@@ -16,6 +18,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
@@ -274,6 +277,220 @@ namespace
         return passed;
     }
 
+    // In-memory ISO9660 image with hand-written descriptors and directory records.
+    class ImageHost final : public NullHost
+    {
+    public:
+        std::string hostPath(HostPathKind kind) const override
+        {
+            return kind == HostPathKind::CdImage ? "synthetic.iso" : std::string{};
+        }
+        uint64_t openHostFile(std::string_view) override { return 1u; }
+        bool readHostFile(uint64_t, uint64_t offset, void *destination, size_t size, size_t &bytesRead) override
+        {
+            bytesRead = 0u;
+            if (offset > image.size())
+                return false;
+            bytesRead = std::min<size_t>(size, image.size() - static_cast<size_t>(offset));
+            std::memcpy(destination, image.data() + offset, bytesRead);
+            return true;
+        }
+        void log(LogLevel, std::string_view message) override { logs.emplace_back(message); }
+
+        std::vector<uint8_t> image;
+        std::vector<std::string> logs;
+    };
+
+    struct TestRecord
+    {
+        std::string name;
+        uint32_t lsn;
+        uint32_t size;
+        bool directory;
+    };
+
+    void putBoth32(uint8_t *destination, uint32_t value)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            destination[i] = static_cast<uint8_t>(value >> (i * 8u));
+            destination[4u + i] = static_cast<uint8_t>(value >> ((3u - i) * 8u));
+        }
+    }
+
+    size_t putRecord(uint8_t *destination, const TestRecord &record)
+    {
+        const size_t unpadded = 33u + record.name.size();
+        const size_t length = unpadded + (unpadded & 1u);
+        std::memset(destination, 0, length);
+        destination[0] = static_cast<uint8_t>(length);
+        putBoth32(destination + 2u, record.lsn);
+        putBoth32(destination + 10u, record.size);
+        destination[18] = 99u; // 1999-12-31 23:59:58
+        destination[19] = 12u;
+        destination[20] = 31u;
+        destination[21] = 23u;
+        destination[22] = 59u;
+        destination[23] = 58u;
+        destination[25] = record.directory ? 2u : 0u;
+        destination[32] = static_cast<uint8_t>(record.name.size());
+        std::memcpy(destination + 33u, record.name.data(), record.name.size());
+        return length;
+    }
+
+    void writeDirectory(std::vector<uint8_t> &image, uint32_t lsn, uint32_t sectors, const std::vector<TestRecord> &records)
+    {
+        uint8_t *base = image.data() + static_cast<size_t>(lsn) * 2048u;
+        size_t offset = 0u;
+        for (const TestRecord &record : records)
+        {
+            const size_t unpadded = 33u + record.name.size();
+            const size_t length = unpadded + (unpadded & 1u);
+            if (offset % 2048u + length > 2048u)
+                offset = (offset / 2048u + 1u) * 2048u;
+            offset += putRecord(base + offset, record);
+        }
+        (void)sectors;
+    }
+
+    // Layout: root at 20; /GAMES at 21..22 (two sectors, target spills into the second);
+    // /GAMES/DATA at 23; files at 30 and 31.
+    void buildImage(ImageHost &host)
+    {
+        host.image.assign(40u * 2048u, 0u);
+        uint8_t *pvd = host.image.data() + 16u * 2048u;
+        pvd[0] = 1u;
+        std::memcpy(pvd + 1u, "CD001", 5u);
+        pvd[6] = 1u;
+        putRecord(pvd + 156u, TestRecord{std::string(1u, '\0'), 20u, 2048u, true});
+        writeDirectory(host.image, 20u, 1u,
+                       {{std::string(1u, '\0'), 20u, 2048u, true},
+                        {std::string(1u, '\1'), 20u, 2048u, true},
+                        {"GAMES", 21u, 4096u, true},
+                        {"BOOT.ELF;1", 30u, 1234u, false}});
+        std::vector<TestRecord> games = {{std::string(1u, '\0'), 21u, 4096u, true},
+                                         {std::string(1u, '\1'), 20u, 2048u, true}};
+        for (int i = 0; i < 60; ++i)
+            games.push_back({"FILLER" + std::to_string(10 + i) + ".DAT;1", 31u, 8u, false});
+        games.push_back({"DATA", 23u, 2048u, true});
+        games.push_back({"LATE.CFG;1", 31u, 77u, false});
+        writeDirectory(host.image, 21u, 2u, games);
+        writeDirectory(host.image, 23u, 1u,
+                       {{std::string(1u, '\0'), 23u, 2048u, true},
+                        {std::string(1u, '\1'), 21u, 4096u, true},
+                        {"CONFIG.BIN;1", 30u, 4242u, false}});
+    }
+
+    struct SearchResult
+    {
+        bool found = false;
+        uint32_t lsn = 0u;
+        uint32_t size = 0u;
+        std::string name;
+        std::array<uint8_t, 8u> date{};
+    };
+
+    SearchResult searchPath(IopCdvd &cdvd, IopMemory &memory, const std::string &path)
+    {
+        constexpr uint32_t resultAddress = 0x2400u;
+        constexpr uint32_t pathAddress = 0x2480u;
+        (void)memory.writeRam(pathAddress, path.c_str(), path.size() + 1u);
+        IopCpuState cpu{};
+        cpu.gpr[4] = resultAddress;
+        cpu.gpr[5] = pathAddress;
+        SearchResult result;
+        if (!cdvd.dispatchImport(10u, cpu))
+            return result;
+        result.found = cpu.gpr[2] == 1u;
+        if (result.found)
+        {
+            result.lsn = memory.read32(resultAddress);
+            result.size = memory.read32(resultAddress + 4u);
+            result.name = memory.readString(resultAddress + 8u, 16u);
+            for (uint32_t i = 0u; i < 8u; ++i)
+                result.date[i] = memory.read8(resultAddress + 24u + i);
+        }
+        return result;
+    }
+
+    size_t countNotFound(const ImageHost &host, std::string_view path)
+    {
+        return static_cast<size_t>(std::count(host.logs.begin(), host.logs.end(),
+                                              "[cdvd] sceCdSearchFile: not found: " + std::string(path)));
+    }
+
+    bool testCdvdSearchFileInImage()
+    {
+        ImageHost host;
+        buildImage(host);
+        IopMemory memory;
+        IopKernel kernel(memory);
+        kernel.reset();
+        IopCdvd cdvd(host, memory, kernel);
+        cdvd.reset();
+
+        for (const char *path : {"cdrom0:\\GAMES\\DATA\\CONFIG.BIN;1", "cdrom0:/games/data/config.bin",
+                                 "cdrom:\\Games/Data\\Config.Bin;1", "\\games\\data\\config.bin;1",
+                                 "CDROM0:///GAMES/DATA/CONFIG.BIN"})
+        {
+            const SearchResult r = searchPath(cdvd, memory, path);
+            if (!expect(r.found, std::string("image lookup failed: ") + path) ||
+                !expect(r.lsn == 30u && r.size == 4242u, "image lookup returned the wrong lsn or size") ||
+                !expect(r.name == "CONFIG.BIN;1", "image lookup did not return the stored leaf name"))
+                return false;
+        }
+
+        const SearchResult late = searchPath(cdvd, memory, "cdrom0:\\GAMES\\LATE.CFG");
+        if (!expect(late.found && late.lsn == 31u && late.size == 77u,
+                    "entry in the second sector of a directory was not found") ||
+            !expect(late.date[0] == 0u && late.date[1] == 58u && late.date[2] == 59u && late.date[3] == 23u &&
+                        late.date[4] == 31u && late.date[5] == 12u && late.date[6] == (1999u & 0xFFu) &&
+                        late.date[7] == (1999u >> 8u),
+                    "date bytes do not follow the directory record"))
+            return false;
+
+        const SearchResult dir = searchPath(cdvd, memory, "cdrom0:\\GAMES");
+        if (!expect(dir.found && dir.lsn == 21u && dir.name == "GAMES" && dir.date[0] == 2u,
+                    "directory lookup failed"))
+            return false;
+        const SearchResult root = searchPath(cdvd, memory, "cdrom0:BOOT.ELF;1");
+        if (!expect(root.found && root.lsn == 30u && root.size == 1234u, "root file lookup failed"))
+            return false;
+
+        for (const char *path : {"cdrom0:\\GAMES\\MISSING.BIN", "cdrom0:\\NOPE\\CONFIG.BIN",
+                                 "cdrom0:\\BOOT.ELF\\X", "cdrom0:\\GAMES\\..\\BOOT.ELF"})
+        {
+            if (!expect(!searchPath(cdvd, memory, path).found, std::string("missing path was found: ") + path))
+                return false;
+            (void)searchPath(cdvd, memory, path);
+            if (!expect(countNotFound(host, path) == 1u, std::string("not-found was not logged exactly once: ") + path))
+                return false;
+        }
+        return true;
+    }
+
+    bool testCdvdSearchFileMalformedImage()
+    {
+        ImageHost host;
+        buildImage(host);
+        host.image[static_cast<size_t>(21u) * 2048u + 100u] = 0xFFu; // bogus record length in /GAMES
+        IopMemory memory;
+        IopKernel kernel(memory);
+        kernel.reset();
+        IopCdvd cdvd(host, memory, kernel);
+        cdvd.reset();
+        if (!expect(!searchPath(cdvd, memory, "cdrom0:\\GAMES\\DATA\\CONFIG.BIN").found,
+                    "malformed directory was not refused") ||
+            !expect(searchPath(cdvd, memory, "cdrom0:BOOT.ELF").found, "root lookup broke after a bad subdirectory"))
+            return false;
+
+        ImageHost noPvd;
+        noPvd.image.assign(40u * 2048u, 0u);
+        IopCdvd cdvd2(noPvd, memory, kernel);
+        cdvd2.reset();
+        return expect(!searchPath(cdvd2, memory, "cdrom0:BOOT.ELF").found, "an image without a PVD was accepted");
+    }
+
     bool testTimrmanPeriodicCallback()
     {
         IopTimrman timrman;
@@ -331,6 +548,7 @@ namespace
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
+        !testCdvdSearchFileInImage() || !testCdvdSearchFileMalformedImage() ||
         !testTimrmanPeriodicCallback())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";

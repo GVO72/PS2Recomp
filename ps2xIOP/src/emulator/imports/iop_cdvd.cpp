@@ -15,6 +15,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -202,6 +203,11 @@ namespace ps2x::iop::detail
             nodes.clear();
             metadataSectors.clear();
             imageHandle = 0u;
+            discRootLoaded = false;
+            discRootValid = false;
+            discRoot = {};
+            discDirectories.clear();
+            loggedMissing.clear();
         }
 
         bool dispatchImport(uint16_t ordinal, IopCpuState &cpu)
@@ -594,18 +600,196 @@ namespace ps2x::iop::detail
             return &nodes[current];
         }
 
+        struct DiscEntry
+        {
+            std::string name; // identifier as stored on the disc, ";1" included
+            uint32_t lsn = 0u;
+            uint32_t size = 0u;
+            uint8_t flags = 0u;
+            std::array<uint8_t, 7u> date{}; // directory record date: y-1900, m, d, h, min, s, tz
+        };
+
+        // Bounds for a malformed image: refuse rather than read without limit.
+        static constexpr uint32_t kMaxDirectoryBytes = 16u * 1024u * 1024u;
+        static constexpr size_t kMaxCachedDirectories = 4096u;
+        static constexpr size_t kMaxLoggedMissing = 256u;
+
+        bool readImageBytes(uint64_t offset, void *destination, size_t size)
+        {
+            const std::string imagePath = host.hostPath(HostPathKind::CdImage);
+            if (imagePath.empty())
+                return false;
+            if (imageHandle == 0u)
+                imageHandle = host.openHostFile(imagePath);
+            if (imageHandle == 0u)
+                return false;
+            size_t bytesRead = 0u;
+            return host.readHostFile(imageHandle, offset, destination, size, bytesRead) && bytesRead == size;
+        }
+
+        static bool parseDirectoryRecord(const uint8_t *record, DiscEntry &entry)
+        {
+            entry.lsn = static_cast<uint32_t>(record[2]) | (static_cast<uint32_t>(record[3]) << 8u) |
+                        (static_cast<uint32_t>(record[4]) << 16u) | (static_cast<uint32_t>(record[5]) << 24u);
+            entry.size = static_cast<uint32_t>(record[10]) | (static_cast<uint32_t>(record[11]) << 8u) |
+                         (static_cast<uint32_t>(record[12]) << 16u) | (static_cast<uint32_t>(record[13]) << 24u);
+            entry.flags = record[25];
+            std::copy(record + 18u, record + 25u, entry.date.begin());
+            entry.name.assign(reinterpret_cast<const char *>(record + 33u), record[32]);
+            return true;
+        }
+
+        bool loadDiscRoot()
+        {
+            if (discRootLoaded)
+                return discRootValid;
+            discRootLoaded = true;
+            std::array<uint8_t, kSectorSize> sector{};
+            if (!readImageBytes(static_cast<uint64_t>(kPrimaryVolumeDescriptorLsn) * kSectorSize,
+                                sector.data(), sector.size()))
+                return false;
+            if (sector[0] != 1u || std::memcmp(sector.data() + 1u, "CD001", 5u) != 0)
+                return false;
+            const uint8_t *record = sector.data() + 156u;
+            if (record[0] < 34u || (record[25] & 2u) == 0u)
+                return false;
+            parseDirectoryRecord(record, discRoot);
+            discRoot.name.clear();
+            if (discRoot.size == 0u || discRoot.size > kMaxDirectoryBytes)
+                return false;
+            discRootValid = true;
+            return true;
+        }
+
+        // Parses one directory extent once; nullptr when the extent is unreadable or malformed.
+        const std::vector<DiscEntry> *loadDiscDirectory(const DiscEntry &directory)
+        {
+            const auto cached = discDirectories.find(directory.lsn);
+            if (cached != discDirectories.end())
+                return cached->second.valid ? &cached->second.entries : nullptr;
+            DiscDirectory &result = discDirectories[directory.lsn];
+            if (directory.size == 0u || directory.size > kMaxDirectoryBytes)
+                return nullptr;
+            std::vector<uint8_t> bytes(alignSectors(directory.size) * static_cast<size_t>(kSectorSize));
+            if (!readImageBytes(static_cast<uint64_t>(directory.lsn) * kSectorSize, bytes.data(), bytes.size()))
+                return nullptr;
+
+            size_t offset = 0u;
+            while (offset < directory.size)
+            {
+                const size_t sectorEnd = (offset / kSectorSize + 1u) * kSectorSize;
+                const size_t length = bytes[offset];
+                if (length == 0u)
+                {
+                    offset = sectorEnd;
+                    continue;
+                }
+                if (length < 34u || offset + length > sectorEnd || 33u + bytes[offset + 32u] > length)
+                    return nullptr;
+                DiscEntry entry;
+                parseDirectoryRecord(bytes.data() + offset, entry);
+                offset += length;
+                if (entry.name.size() == 1u && (entry.name[0] == '\0' || entry.name[0] == '\x01'))
+                    continue;
+                result.entries.push_back(std::move(entry));
+            }
+            result.valid = true;
+            return &result.entries;
+        }
+
+        // Resolves a path in the image's own ISO9660 file system.
+        const DiscEntry *findDiscEntry(std::string_view guestPath)
+        {
+            if (!loadDiscRoot())
+                return nullptr;
+            const ParsedPs2Path parsed = parsePs2Path(guestPath);
+            if (!parsed || parsed.device != Ps2PathDevice::Cdrom)
+                return nullptr;
+
+            // Cleared only here, never mid-walk: the walk holds pointers into the cache.
+            if (discDirectories.size() + 64u >= kMaxCachedDirectories)
+                discDirectories.clear();
+            const DiscEntry *current = &discRoot;
+            size_t begin = 0u;
+            while (begin <= parsed.path.size())
+            {
+                const size_t end = parsed.path.find('/', begin);
+                const size_t length = (end == std::string::npos) ? parsed.path.size() - begin : end - begin;
+                const std::string_view component(parsed.path.data() + begin, length);
+                begin = (end == std::string::npos) ? parsed.path.size() + 1u : end + 1u;
+
+                if (component.empty() || component == ".")
+                    continue;
+                if (component == "..")
+                    return nullptr;
+                if ((current->flags & 2u) == 0u)
+                    return nullptr;
+
+                const std::vector<DiscEntry> *entries = loadDiscDirectory(*current);
+                if (!entries)
+                    return nullptr;
+                const std::string wanted = normalizedIsoComponent(component);
+                const auto child = std::find_if(entries->begin(), entries->end(),
+                                                [&](const DiscEntry &entry)
+                                                {
+                                                    return normalizedIsoComponent(entry.name) == wanted;
+                                                });
+                if (child == entries->end())
+                    return nullptr;
+                current = &*child;
+            }
+            return current;
+        }
+
+        void logMissing(const std::string &guestPath)
+        {
+            if (loggedMissing.size() >= kMaxLoggedMissing || !loggedMissing.insert(guestPath).second)
+                return;
+            host.log(LogLevel::Warning, "[cdvd] sceCdSearchFile: not found: " + guestPath);
+        }
+
         bool searchFile(uint32_t resultAddress, uint32_t nameAddress)
         {
             if (resultAddress == 0u || nameAddress == 0u)
                 return false;
 
             const std::string guestPath = memory.readString(nameAddress, 1024u);
-            IsoNode *node = findVirtualIsoNode(guestPath);
-            if (!node)
-                return false;
-
             // sceCdlFILE: lsn, size, name[16], date/flags[8].
             std::array<uint8_t, 32u> result{};
+
+            if (!host.hostPath(HostPathKind::CdImage).empty())
+            {
+                // Same rule as readSectors: a configured image is the disc, so names resolve in
+                // its file system and the LSNs match what sceCdRead will read.
+                const DiscEntry *entry = findDiscEntry(guestPath);
+                if (!entry)
+                {
+                    logMissing(guestPath);
+                    return false;
+                }
+                writeLe32(result.data(), entry->lsn);
+                writeLe32(result.data() + 4u, entry->size);
+                std::memcpy(result.data() + 8u, entry->name.data(), std::min<size_t>(16u, entry->name.size()));
+                // date[0] = ISO file flags; date[1..7] = sec, min, hour, day, month, year (LE, full year).
+                const unsigned year = 1900u + entry->date[0];
+                result[24u] = entry->flags;
+                result[25u] = entry->date[5];
+                result[26u] = entry->date[4];
+                result[27u] = entry->date[3];
+                result[28u] = entry->date[2];
+                result[29u] = entry->date[1];
+                result[30u] = static_cast<uint8_t>(year);
+                result[31u] = static_cast<uint8_t>(year >> 8u);
+                return memory.writeRam(resultAddress, result.data(), result.size());
+            }
+
+            IsoNode *node = findVirtualIsoNode(guestPath);
+            if (!node)
+            {
+                logMissing(guestPath);
+                return false;
+            }
+
             writeLe32(result.data(), node->lsn);
             writeLe32(result.data() + 4u, node->size);
             const std::string leaf = normalizedIsoComponent(node->identifier);
@@ -723,6 +907,16 @@ namespace ps2x::iop::detail
         bool virtualIsoBuilt = false;
         bool virtualIsoValid = false;
         uint32_t volumeSectors = 0u;
+        struct DiscDirectory
+        {
+            bool valid = false;
+            std::vector<DiscEntry> entries;
+        };
+        bool discRootLoaded = false;
+        bool discRootValid = false;
+        DiscEntry discRoot;
+        std::unordered_map<uint32_t, DiscDirectory> discDirectories;
+        std::unordered_set<std::string> loggedMissing;
         std::vector<IsoNode> nodes;
         std::unordered_map<uint32_t, std::array<uint8_t, kSectorSize>> metadataSectors;
     };
