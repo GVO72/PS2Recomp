@@ -31,6 +31,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_audio.h"
+#include "runtime/ps2_host_clock.h"
 #include "runtime/ps2_pad.h"
 #include "runtime/ps2_rom_device.h"
 #include "runtime/ps2_vfs.h"
@@ -283,6 +284,13 @@ public:
         std::filesystem::path cdImage;
     };
 
+    // The vsync rate in deterministic mode: PAL 50 Hz, NTSC 60000/1001 Hz (59.94 Hz).
+    enum class VideoMode : uint32_t
+    {
+        Ntsc,
+        Pal,
+    };
+
     // How the runtime talks to the host. The defaults are the interactive
     // behaviour: a window, an audio device, host time and host input.
     struct RunMode
@@ -291,6 +299,24 @@ public:
         // needs a window, a GL context or an audio device is called, from any thread.
         // run() then only starts the game thread and waits for it.
         bool headless = false;
+
+        // Emulated time only; no host clock and no host input.
+        //  - Pacing: an event is due when the emulated EE cycle count reaches its deadline.
+        //    Nothing waits on the host clock, and an idle guest is fast-forwarded to the next
+        //    deadline instead of sleeping. Alarms are scheduled by cycles alone.
+        //  - Vsync: the EE and the IOP run at videoMode's rate. Vsync n is due at
+        //    floor(n * clock / rate) cycles, so there is no drift.
+        //  - Clock: sceCdReadClock reports 2000-01-01 00:00:00 plus floor(vsyncs / R) seconds
+        //    (R = 50 for PAL, 60 for NTSC; the oracle's rule), with no time zone. The
+        //    time-zone offset is 0, and file and memory-card timestamps are
+        //    2000-01-01 00:00:00 UTC.
+        //  - Input: the pad reports every button released and centred sticks, and reads
+        //    nothing from the host. A pad override set by the embedder still wins.
+        // std::rand is left alone: it is deterministic given the guest's own srand seed
+        // because the guest runs on a single thread.
+        bool deterministic = false;
+
+        VideoMode videoMode = VideoMode::Ntsc;
     };
 
     PS2Runtime();

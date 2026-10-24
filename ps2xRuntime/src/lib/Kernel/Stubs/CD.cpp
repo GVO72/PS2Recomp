@@ -518,12 +518,17 @@ namespace ps2_stubs
         }
 
         std::time_t now = std::time(nullptr);
+        if (ps2_host_clock::deterministic())
+        {
+            // The oracle's clock: 2000-01-01 00:00:00 plus one second per
+            // vsync-rate's worth of EE vsyncs, with no time zone.
+            const uint64_t vsyncsPerSecond =
+                runtime && runtime->runMode().videoMode == PS2Runtime::VideoMode::Pal ? 50u : 60u;
+            const uint64_t vsyncs = runtime ? runtime->eeScheduler().currentVSyncTick() : 0u;
+            now = ps2_host_clock::kFixedEpoch + static_cast<std::time_t>(vsyncs / vsyncsPerSecond);
+        }
         std::tm localTm{};
-#ifdef _WIN32
-        localtime_s(&localTm, &now);
-#else
-        localtime_r(&now, &localTm);
-#endif
+        ps2_host_clock::breakDown(&now, &localTm);
 
         // sceCdCLOCK format (BCD fields).
         clockData[0] = 0;

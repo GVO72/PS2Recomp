@@ -127,6 +127,16 @@ namespace ps2x::iop
         uint32_t size = 0;
     };
 
+    // How the IOP's vblank waits are timed. Off (the default), they follow the NTSC
+    // cadence of ~59.94 Hz with a rounded integer period. On, field n starts at
+    // exactly floor(n * kIopClockHz / rate) cycles, at 50 Hz (PAL) or 60000/1001 Hz
+    // (NTSC), so there is no rounding drift.
+    struct VblankTiming
+    {
+        bool exact = false;
+        bool pal = false;
+    };
+
     struct DebugMetric
     {
         std::string name;

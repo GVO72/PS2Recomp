@@ -1,5 +1,6 @@
 #include "runtime/ps2_vfs.h"
 
+#include "runtime/ps2_host_clock.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_rom_device.h"
 
@@ -147,6 +148,8 @@ namespace
 
     std::time_t toTimeT(std::filesystem::file_time_type value)
     {
+        if (ps2_host_clock::deterministic())
+            return ps2_host_clock::kFixedEpoch;
         const auto systemValue = std::chrono::time_point_cast<std::chrono::system_clock::duration>(value - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
         return std::chrono::system_clock::to_time_t(systemValue);
     }

@@ -1082,6 +1082,8 @@ namespace ps2_stubs
 
     void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // Deterministic given the guest's own srand seed (std::rand starts at seed 1), but only
+        // because the guest runs on a single thread: the sequence is not shared with any other.
         setReturnS32(ctx, std::rand() & 0x7FFF);
     }
 

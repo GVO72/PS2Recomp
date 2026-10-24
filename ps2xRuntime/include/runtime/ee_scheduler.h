@@ -337,6 +337,14 @@ public:
     bool dispatchIrq(bool dmac, uint32_t cause, std::function<void()> afterHandlers);
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
+    // The EE cycle counter. Read it on the game thread (an observer, a stub) or after run()
+    // has returned; it is not synchronised for other threads.
+    [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; }
+    // In deterministic mode, the EE cycle at which vsync number `index` (0 is the first field
+    // after reset, counted from cycle 0) is due: floor(index * kEeClockHz / rate) with
+    // rate = 50 Hz (PAL) or 60000/1001 Hz (NTSC). Computed from the index, never by adding a
+    // rounded period, so it does not drift.
+    [[nodiscard]] static uint64_t exactVsyncCycle(uint64_t index, bool pal) noexcept;
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
 
     [[noreturn]] void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
@@ -445,6 +453,11 @@ private:
     uint64_t m_eventSequence = 0;
     uint64_t m_invocationSequence = 0;
     uint64_t m_vsyncTick = 0;
+    // Deterministic pacing (PS2Runtime::RunMode), latched at reset(): events are due by
+    // emulated cycles alone and the host clock is never read or waited on.
+    bool m_deterministic = false;
+    bool m_palVideo = false;
+    uint64_t m_vsyncBaseCycle = 0;
     uint32_t m_vsyncFlagAddress = 0;
     uint32_t m_vsyncTickAddress = 0;
     uint32_t m_gsVSyncCallback = 0;

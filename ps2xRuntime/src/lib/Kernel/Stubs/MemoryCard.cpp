@@ -254,15 +254,16 @@ namespace ps2_stubs
 
         bool localtimeSafeMc(const std::time_t *value, std::tm *out)
         {
-#ifdef _WIN32
-            return localtime_s(out, value) == 0;
-#else
-            return localtime_r(value, out) != nullptr;
-#endif
+            // Local time, or UTC in deterministic mode.
+            return ps2_host_clock::breakDown(value, out);
         }
 
         std::time_t fileTimeToTimeTMc(std::filesystem::file_time_type value)
         {
+            if (ps2_host_clock::deterministic())
+            {
+                return ps2_host_clock::kFixedEpoch;
+            }
             const auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
                 value - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
             return std::chrono::system_clock::to_time_t(systemTime);
@@ -764,7 +765,7 @@ namespace ps2_stubs
                     if (std::filesystem::exists(hostDir, ec) && !ec &&
                         std::filesystem::is_directory(hostDir, ec))
                     {
-                        const std::time_t now = std::time(nullptr);
+                        const std::time_t now = ps2_host_clock::now();
                         auto appendSpecial = [&](const std::string &name)
                         {
                             if (!wildcardMatch(pattern, name))

@@ -739,6 +739,11 @@ namespace ps2x::iop::detail
         return m_impl->stopModule(moduleId, result);
     }
 
+    void IopEmulator::setVblankTiming(const VblankTiming &timing) noexcept
+    {
+        m_impl->vblank.setTiming(timing);
+    }
+
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
     {
         const uint64_t total = m_impl->eeCycleCarry + eeCycles;

@@ -308,7 +308,7 @@ namespace ps2_stubs
                     state.ly = backendData[7];
                     usedBackend = true;
                 }
-                else
+                else if (!runtime || runtime->padBackend().hostInputEnabled())
                 {
                     applyGamepadState(state);
                     applyKeyboardState(state, portState.analogMode);
