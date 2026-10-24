@@ -1227,6 +1227,25 @@ void register_code_generator_tests()
                      "PCPYLD should use PS2_PCPYLD helper");
         });
 
+        tc.Run("PMFHL.LW and PMFHL.UW read both HI/LO doublewords", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction pmfhl{};
+            pmfhl.isMMI = true;
+            pmfhl.opcode = OPCODE_MMI;
+            pmfhl.function = MMI_PMFHL;
+            pmfhl.rd = 2;
+
+            pmfhl.sa = PMFHL_LW;
+            t.IsTrue(gen.translateInstruction(pmfhl).find("PS2_PMFHL_LW(ctx->hi, ctx->lo, ctx->hi1, ctx->lo1)") !=
+                         std::string::npos,
+                     "PMFHL.LW should pass hi, lo, hi1 and lo1");
+            pmfhl.sa = PMFHL_UW;
+            t.IsTrue(gen.translateInstruction(pmfhl).find("PS2_PMFHL_UW(ctx->hi, ctx->lo, ctx->hi1, ctx->lo1)") !=
+                         std::string::npos,
+                     "PMFHL.UW should pass hi, lo, hi1 and lo1");
+        });
+
         tc.Run("Unary MMI permutations read their source from rt", [](TestCase &t) {
             CodeGenerator gen({}, {});
 

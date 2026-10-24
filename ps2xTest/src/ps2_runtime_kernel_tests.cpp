@@ -549,6 +549,33 @@ void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("PMFHL.LW and PMFHL.UW interleave the words of LO and HI", [](TestCase &t)
+        {
+            // MULTU 0x23456789 * 0x00010001 = 0x000023458ACE6789: LO and HI hold the
+            // sign-extended halves, as the recompiled MULTU stores them.
+            const uint64_t lo = 0xFFFFFFFF8ACE6789ull;
+            const uint64_t hi = 0x0000000000002345ull;
+            const uint64_t lo1 = 0x1111111122222222ull;
+            const uint64_t hi1 = 0x3333333344444444ull;
+
+            alignas(16) uint32_t words[4]{};
+            _mm_store_si128(reinterpret_cast<__m128i *>(words), PS2_PMFHL_LW(hi, lo, hi1, lo1));
+            t.Equals(words[0], 0x8ACE6789u, "LW word 0 is LO.w0");
+            t.Equals(words[1], 0x00002345u, "LW word 1 is HI.w0");
+            t.Equals(words[2], 0x22222222u, "LW word 2 is LO.w2");
+            t.Equals(words[3], 0x44444444u, "LW word 3 is HI.w2");
+
+            alignas(16) uint64_t doublewords[2]{};
+            _mm_store_si128(reinterpret_cast<__m128i *>(doublewords), PS2_PMFHL_LW(hi, lo, hi1, lo1));
+            t.Equals(doublewords[0], 0x000023458ACE6789ull, "LW rebuilds the 64-bit MULTU product");
+
+            _mm_store_si128(reinterpret_cast<__m128i *>(words), PS2_PMFHL_UW(hi, lo, hi1, lo1));
+            t.Equals(words[0], 0xFFFFFFFFu, "UW word 0 is LO.w1");
+            t.Equals(words[1], 0x00000000u, "UW word 1 is HI.w1");
+            t.Equals(words[2], 0x11111111u, "UW word 2 is LO.w3");
+            t.Equals(words[3], 0x33333333u, "UW word 3 is HI.w3");
+        });
+
         tc.Run("unsigned loads and ABI word writes extend independently", [](TestCase &t)
         {
             constexpr uint64_t kUpper = 0x1122334455667788ull;
