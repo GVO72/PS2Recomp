@@ -826,8 +826,24 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
     return _mm_set1_epi64x(static_cast<long long>(value));
 }
 
-#define PS2_PMFHL_LW(hi, lo) _mm_unpacklo_epi64(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
-#define PS2_PMFHL_UW(hi, lo) _mm_unpackhi_epi64(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
+// PMFHL.LW / PMFHL.UW interleave the lower (LW) or upper (UW) words of each
+// doubleword of LO and HI: rd = {LO.w0, HI.w0, LO.w2, HI.w2} for LW and
+// {LO.w1, HI.w1, LO.w3, HI.w3} for UW. hi/lo hold doubleword 0 (MULT, DIV),
+// hi1/lo1 doubleword 1 (MULT1, DIV1).
+inline __m128i ps2_pmfhl_lw(uint64_t hi, uint64_t lo, uint64_t hi1, uint64_t lo1)
+{
+    return _mm_set_epi32(static_cast<int>(static_cast<uint32_t>(hi1)), static_cast<int>(static_cast<uint32_t>(lo1)),
+                         static_cast<int>(static_cast<uint32_t>(hi)), static_cast<int>(static_cast<uint32_t>(lo)));
+}
+
+inline __m128i ps2_pmfhl_uw(uint64_t hi, uint64_t lo, uint64_t hi1, uint64_t lo1)
+{
+    return _mm_set_epi32(static_cast<int>(static_cast<uint32_t>(hi1 >> 32)), static_cast<int>(static_cast<uint32_t>(lo1 >> 32)),
+                         static_cast<int>(static_cast<uint32_t>(hi >> 32)), static_cast<int>(static_cast<uint32_t>(lo >> 32)));
+}
+
+#define PS2_PMFHL_LW(hi, lo, hi1, lo1) ps2_pmfhl_lw((hi), (lo), (hi1), (lo1))
+#define PS2_PMFHL_UW(hi, lo, hi1, lo1) ps2_pmfhl_uw((hi), (lo), (hi1), (lo1))
 #define PS2_PMFHL_SLW(hi, lo) _mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
 #define PS2_PMFHL_LH(hi, lo) _mm_shuffle_epi32(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0))
 #define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0)), _MM_SHUFFLE(3, 1, 2, 0))
