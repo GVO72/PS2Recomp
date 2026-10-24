@@ -422,17 +422,19 @@ void register_ps2_gs_tests()
             constexpr uint32_t kGsCsr = 0x12001000u;
             constexpr uint32_t kGsImr = 0x12001010u;
 
-            const uint64_t csrPattern = 0xA1B2C3D4E5F60718ull;
+            // Bits 0..4 are write-one-to-clear event bits, so the round trip
+            // pattern keeps them clear.
+            const uint64_t csrPattern = 0xA1B2C3D4E5F60700ull;
             mem.write64(kGsCsr, csrPattern);
             t.Equals(mem.read64(kGsCsr), csrPattern, "64-bit CSR read should match prior 64-bit write");
             t.Equals(mem.read32(kGsCsr), static_cast<uint32_t>(csrPattern & 0xFFFFFFFFull), "CSR low dword read should match");
             t.Equals(mem.read32(kGsCsr + 4u), static_cast<uint32_t>(csrPattern >> 32), "CSR high dword read should match");
 
-            mem.write32(kGsCsr, 0x11223344u);
-            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411223344ull, "32-bit low write should preserve CSR high dword");
+            mem.write32(kGsCsr, 0x11223340u);
+            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411223340ull, "32-bit low write should preserve CSR high dword");
 
             mem.write32(kGsCsr + 4u, 0x55667788u);
-            t.Equals(mem.read64(kGsCsr), 0x5566778811223344ull, "32-bit high write should preserve CSR low dword");
+            t.Equals(mem.read64(kGsCsr), 0x5566778811223340ull, "32-bit high write should preserve CSR low dword");
 
             const uint64_t imrPattern = 0x0123456789ABCDEFull;
             mem.write64(kGsImr, imrPattern);
@@ -2113,6 +2115,15 @@ void register_ps2_gs_tests()
 
             mem.write32(0x12001000u, 0x2u);
             t.IsTrue((mem.gs().csr & 0x2ull) == 0ull, "writing CSR bit1 should acknowledge FINISH");
+
+            mem.gs().csr.fetch_or(0x18ull); // VSINT and EDWINT raised
+            mem.write64(0x12001000u, 0x8ull);
+            t.IsTrue((mem.gs().csr & 0x8ull) == 0ull, "writing CSR bit3 should acknowledge VSINT");
+            t.IsTrue((mem.gs().csr & 0x10ull) != 0ull, "acknowledging VSINT should not clear EDWINT");
+            mem.write32(0x12001000u, 0x0u);
+            t.IsTrue((mem.gs().csr & 0x10ull) != 0ull, "writing 0 must not clear an event bit");
+            mem.write32(0x12001000u, 0x10u);
+            t.IsTrue((mem.gs().csr & 0x10ull) == 0ull, "writing CSR bit4 should acknowledge EDWINT");
         });
 
         tc.Run("GIF IMAGE packet writes host-to-local data into GS VRAM", [](TestCase &t)

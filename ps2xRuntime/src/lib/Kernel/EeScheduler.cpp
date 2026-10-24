@@ -1869,6 +1869,8 @@ void EeScheduler::processEvent(const EeEvent &event)
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
+        // CSR.VSINT: the vsync event, which code that polls for vsync waits on.
+        m_runtime.memory().gs().csr.fetch_or(0x8ull, std::memory_order_acq_rel);
         if ((m_vsyncTick & 1u) != 0u)
         {
             m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);

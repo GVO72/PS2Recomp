@@ -523,6 +523,7 @@ void register_ps2_runtime_interrupt_tests()
             t.Equals(g_resumedResult, 0, "the first VBlank field should return even-field parity");
             t.Equals(g_vsyncCsr & 0x2000ull, 0x2000ull,
                      "the first VBlank should publish GS CSR.FIELD before resuming guest code");
+            t.Equals(g_vsyncCsr & 0x8ull, 0x8ull, "VBlank should raise GS CSR.VSINT");
         });
 
         tc.Run("VBlank IRQ invocation completes before the resumed base context", [](TestCase &t)
