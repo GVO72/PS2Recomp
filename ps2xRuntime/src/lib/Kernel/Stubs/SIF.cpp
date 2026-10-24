@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "SIF.h"
+#include "SifCmdProtocol.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
 #include "runtime/ps2_address.h"
@@ -80,6 +81,7 @@ namespace ps2_stubs
         uint32_t g_sifGetRegLogCount = 0u;
         uint32_t g_sifSetRegLogCount = 0u;
 
+        constexpr uint32_t kSifRegIopCommandBuffer = 0x2u;
         constexpr uint32_t kSifRegBootStatus = 0x4u;
         constexpr uint32_t kSifRegMainAddr = 0x80000000u;
         constexpr uint32_t kSifRegSubAddr = 0x80000001u;
@@ -222,8 +224,11 @@ namespace ps2_stubs
 
     void resetSifState()
     {
-        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
-        seedDefaultSifRegsLocked();
+        {
+            std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+            seedDefaultSifRegsLocked();
+        }
+        sif_protocol::reset();
     }
 
     bool dispatchSifCommand(uint8_t *rdram,
@@ -479,6 +484,11 @@ namespace ps2_stubs
                 ++g_sifGetRegLogCount;
             }
         }
+        if (reg == kSifRegIopCommandBuffer && value == 0u)
+        {
+            // SIF_REG_SUBADDR: where the EE sends command packets for the IOP.
+            value = sif_protocol::iopCommandBuffer(runtime);
+        }
         if (shouldLog)
         {
             PS2_IF_AGRESSIVE_LOGS({
@@ -730,6 +740,10 @@ namespace ps2_stubs
                                                                         xfer.dest,
                                                                         static_cast<uint32_t>(xfer.size),
                                                                     });
+                }
+                if (sif_protocol::isIopCommandBuffer(xfer.dest))
+                {
+                    sif_protocol::onCommandPacket(rdram, ctx, runtime, payload.data(), payload.size());
                 }
             }
         }

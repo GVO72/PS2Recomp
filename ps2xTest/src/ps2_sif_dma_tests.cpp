@@ -5,6 +5,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "Kernel/Stubs/SIF.h"
+#include "Kernel/Stubs/SifCmdProtocol.h"
 #include "runtime/ee_scheduler.h"
 
 #include <array>
@@ -124,6 +125,31 @@ namespace
         ps2_stubs::sceSifSetDma(rdram, ctx, runtime);
     }
 
+    // Send one SIF command packet from EE RAM to the IOP command buffer, the way
+    // the EE's sceSifSendCmd does: a single SetDma descriptor.
+    void sendSifCommand(TestEnv &env, uint32_t iopBuffer, const std::vector<uint32_t> &words)
+    {
+        constexpr uint32_t kCommandSrcAddr = 0x00022000u;
+        constexpr uint32_t kCommandDescAddr = 0x00022100u;
+        std::memcpy(env.rdram.data() + kCommandSrcAddr, words.data(), words.size() * sizeof(uint32_t));
+        const Ps2SifDmaTransfer desc{
+            kCommandSrcAddr,
+            iopBuffer,
+            static_cast<int32_t>(words.size() * sizeof(uint32_t)),
+            0x44};
+        std::memcpy(env.rdram.data() + kCommandDescAddr, &desc, sizeof(desc));
+        setRegU32(env.ctx, 4, kCommandDescAddr);
+        setRegU32(env.ctx, 5, 1u);
+        ps2_stubs::sceSifSetDma(env.rdram.data(), &env.ctx, &env.runtime);
+    }
+
+    uint32_t querySifReg(TestEnv &env, uint32_t reg)
+    {
+        setRegU32(env.ctx, 4, reg);
+        ps2_stubs::sceSifGetReg(env.rdram.data(), &env.ctx, &env.runtime);
+        return ::getRegU32(&env.ctx, 2);
+    }
+
     void schedulerSifDmaResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_sifDmaResult = getRegS32(*ctx, 2);
@@ -178,6 +204,71 @@ void register_ps2_sif_dma_tests()
             setRegU32(env.ctx, 4, static_cast<uint32_t>(dmaId));
             ps2_stubs::sceSifDmaStat(env.rdram.data(), &env.ctx, &env.runtime);
             t.IsTrue(getRegS32(env.ctx, 2) < 0, "sceSifDmaStat should be negative when transfer is complete");
+        });
+
+        tc.Run("SIF command protocol answers SIFRPC initialisation with SET_SREG", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kEePacketBuffer = 0x20021000u; // uncached, as the EE announces it
+            constexpr uint32_t kEePacketPhysical = 0x00021000u;
+
+            const uint32_t iopBuffer = querySifReg(env, 0x2u);
+            t.IsTrue(iopBuffer != 0u, "SIF_REG_SUBADDR should report an IOP command buffer");
+            t.IsTrue(ps2_stubs::sif_protocol::isIopCommandBuffer(iopBuffer),
+                     "the reported buffer should be recognised as the command buffer");
+
+            // sceSifInitCmd: INIT_CMD with opt 0 carries the EE packet buffer; no reply.
+            sendSifCommand(env, iopBuffer, {20u, 0u, 0x80000002u, 0u, kEePacketBuffer});
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical), 0u,
+                     "SIFCMD initialisation should not produce a reply");
+
+            // sceSifInitRpc: INIT_CMD with opt 1; the IOP sets SREG 0 to 1.
+            sendSifCommand(env, iopBuffer, {16u, 0u, 0x80000002u, 1u});
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical) & 0xFFu, 24u,
+                     "the reply should be a 24-byte packet");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 8u), 0x80000001u,
+                     "the reply should be SIF_CMD_SET_SREG");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 16u), 0u, "SREG index 0");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 20u), 1u, "SREG value 1");
+        });
+
+        tc.Run("SIF command protocol queues replies until the EE frees its packet buffer", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kEePacketPhysical = 0x00021000u;
+            constexpr uint32_t kClient = 0x00023000u;
+            const uint32_t iopBuffer = querySifReg(env, 0x2u);
+            sendSifCommand(env, iopBuffer, {20u, 0u, 0x80000002u, 0u, kEePacketPhysical});
+
+            // Two binds to a SID nothing serves: each is answered by RPC_END with
+            // no server, which tells the EE to retry.
+            const std::vector<uint32_t> bind{64u, 0u, 0x80000009u, 0u, 7u, 0x00024000u, 3u, kClient, 0x12340000u,
+                                             0u, 0u, 0u, 0u, 0u, 0u, 0u};
+            sendSifCommand(env, iopBuffer, bind);
+            sendSifCommand(env, iopBuffer, bind);
+
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 8u), 0x80000008u,
+                     "the first reply should be SIF_CMD_RPC_END");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 16u), 7u, "rec_id is echoed");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 20u), 0x00024000u, "pkt_addr is echoed");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 24u), 3u, "rpc_id is echoed");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 28u), kClient, "the client is echoed");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 32u), 0x80000009u, "it ends a bind");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 36u), 0u, "no server for an unknown SID");
+
+            // The EE handler has not cleared psize yet, so the second reply waits.
+            writeGuestU32(env.rdram.data(), kEePacketPhysical + 16u, 0xFFFFFFFFu);
+            ps2_stubs::sif_protocol::deliverPending(env.rdram.data(), &env.runtime);
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 16u), 0xFFFFFFFFu,
+                     "a reply must not overwrite an unconsumed packet");
+
+            // Once the handler clears psize, the next reply is delivered.
+            writeGuestU32(env.rdram.data(), kEePacketPhysical, 0u);
+            ps2_stubs::sif_protocol::deliverPending(env.rdram.data(), &env.runtime);
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 8u), 0x80000008u,
+                     "the second reply should be delivered after the first is consumed");
+            t.Equals(readGuestU32(env.rdram.data(), kEePacketPhysical + 16u), 7u,
+                     "the second reply should overwrite the consumed packet");
         });
 
         tc.Run("IOP heap DMA uses private backing instead of aliasing EE RDRAM", [](TestCase &t)

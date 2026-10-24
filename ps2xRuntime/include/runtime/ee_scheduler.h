@@ -332,6 +332,9 @@ public:
     int setIrqHandlerEnabled(bool dmac, int id, bool enabled);
     int setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled);
     void dispatchIrq(bool dmac, uint32_t cause);
+    // Same, then runs afterHandlers once the last matching handler has returned.
+    // Returns false (and never runs afterHandlers) when no handler matched.
+    bool dispatchIrq(bool dmac, uint32_t cause, std::function<void()> afterHandlers);
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
