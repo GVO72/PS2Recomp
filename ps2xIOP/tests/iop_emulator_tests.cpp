@@ -561,6 +561,78 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
     }
 
+    // One thread that calls WaitVblankStart in a loop and counts the returns in IOP memory at
+    // 0x00010400. Entry returns 0 once the thread is started.
+    void writeVblankCounterIrx(TestHost &host, uint32_t address)
+    {
+        constexpr uint32_t codeOffset = 0x100u;
+        constexpr uint32_t loadAddress = 0x00010000u;
+        constexpr uint32_t threadAddress = loadAddress + 0x100u;
+        constexpr uint32_t thbaseTableAddress = loadAddress + 0x180u;
+        constexpr uint32_t createThreadStub = thbaseTableAddress + 20u;
+        constexpr uint32_t startThreadStub = createThreadStub + 8u;
+        constexpr uint32_t vblankTableAddress = loadAddress + 0x1C0u;
+        constexpr uint32_t waitVblankStartStub = vblankTableAddress + 20u;
+        constexpr uint32_t threadDescriptor = loadAddress + 0x300u;
+
+        ElfHeader header{};
+        header.ident[0] = 0x7Fu; header.ident[1] = 'E'; header.ident[2] = 'L'; header.ident[3] = 'F';
+        header.ident[4] = 1u; header.ident[5] = 1u; header.ident[6] = 1u;
+        header.type = 2u; header.machine = 8u; header.version = 1u;
+        header.entry = loadAddress; header.phoff = sizeof(ElfHeader);
+        header.ehsize = sizeof(ElfHeader); header.phentsize = sizeof(ProgramHeader); header.phnum = 1u;
+
+        ProgramHeader program{};
+        program.type = 1u; program.offset = codeOffset; program.vaddr = loadAddress; program.paddr = loadAddress;
+        program.filesz = 0x500u; program.memsz = 0x500u; program.flags = 7u; program.align = 4u;
+
+        const auto jal = [](uint32_t target) { return 0x0C000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        const auto jump = [](uint32_t target) { return 0x08000000u | ((target >> 2u) & 0x03FFFFFFu); };
+        const uint32_t entry[] = {
+            0x27BDFFE0u, 0xAFBF001Cu,
+            0x3C040001u, 0x34840300u, jal(createThreadStub), 0x00000000u,
+            0x00408021u, // move s0, v0
+            0x02002021u, 0x00002821u, jal(startThreadStub), 0x00000000u,
+            0x8FBF001Cu, 0x00001021u, 0x27BD0020u, 0x03E00008u, 0x00000000u,
+        };
+        const uint32_t thread[] = {
+            jal(waitVblankStartStub), 0x00000000u,
+            0x3C080001u, 0x35080400u, // t0 = 0x00010400
+            0x8D090000u, 0x25290001u, 0xAD090000u, // lw t1; addiu t1, 1; sw t1
+            jump(threadAddress), 0x00000000u,
+        };
+        const uint32_t thbaseImports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x61626874u, 0x00006573u, // "thbase"
+            0x03E00008u, 0x24000004u, // CreateThread
+            0x03E00008u, 0x24000006u, // StartThread
+            0u, 0u,
+        };
+        const uint32_t vblankImports[] = {
+            0x41E00000u, 0u, 0x00000101u,
+            0x616C6276u, 0x00006B6Eu, // "vblank"
+            0x03E00008u, 0x24000004u, // WaitVblankStart
+            0u, 0u,
+        };
+        const uint32_t descriptor[] = {0u, 0u, threadAddress, 0x400u, 10u};
+
+        std::vector<uint8_t> segment(program.filesz, 0u);
+        const auto put = [&](uint32_t offset, const void *data, size_t size)
+        {
+            std::memcpy(segment.data() + offset, data, size);
+        };
+        put(0u, entry, sizeof(entry));
+        put(0x100u, thread, sizeof(thread));
+        put(0x180u, thbaseImports, sizeof(thbaseImports));
+        put(0x1C0u, vblankImports, sizeof(vblankImports));
+        put(0x300u, descriptor, sizeof(descriptor));
+
+        std::memset(host.guest.data() + address, 0, codeOffset + program.filesz);
+        std::memcpy(host.guest.data() + address, &header, sizeof(header));
+        std::memcpy(host.guest.data() + address + sizeof(header), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + codeOffset, segment.data(), segment.size());
+    }
+
     void writeSifDmaIrx(TestHost &host, uint32_t address)
     {
         constexpr uint32_t codeOffset = 0x100u;
@@ -1050,6 +1122,46 @@ int main()
                 "Could not read the IOP scheduling marker")) return 1;
     if (!expect(lowPriorityMarker == 1u,
                 "WaitVblankEnd returned immediately and starved a lower-priority IOP thread")) return 1;
+
+    // WaitVblankStart counts fields by the video mode's exact period when asked to, and by the
+    // default NTSC cadence otherwise.
+    const auto countVblanks = [&](ps2x::iop::VblankTiming timing, uint64_t iopCycles)
+    {
+        iop.reset();
+        iop.setVblankTiming(timing);
+        writeVblankCounterIrx(host, 0x100u);
+        const ModuleLoadResult counterModule = iop.loadModuleBuffer(0x100u);
+        uint32_t count = 0xFFFFFFFFu;
+        if (counterModule.handled && counterModule.startResult == 0)
+        {
+            iop.runEeCycles(iopCycles * 8u);
+            iop.onSifTransfer({
+                SifTransferKind::GetOtherData,
+                SifTransferPhase::BeforeCopy,
+                0x00010400u,
+                0x1000u,
+                sizeof(uint32_t),
+            });
+            if (!iop.readMemory(0x00010400u, &count, sizeof(count)))
+                count = 0xFFFFFFFEu;
+        }
+        iop.setVblankTiming({});
+        return count;
+    };
+    constexpr uint64_t kPalField = 36'864'000ull / 50ull;
+    // 100 PAL fields plus a little: the 101st field is not due yet.
+    if (!expect(countVblanks({true, true}, 100u * kPalField + 1000u) == 100u,
+                "exact PAL vblank did not count 100 fields at 50 Hz")) return 1;
+    // The same span at the default NTSC cadence is ~119 fields.
+    if (!expect(countVblanks({false, false}, 100u * kPalField + 1000u) == 119u,
+                "the default vblank cadence changed")) return 1;
+    // 1000 NTSC fields are 615,014,400 cycles exactly; the rounded period gives 615,014,000.
+    if (!expect(countVblanks({true, false}, 615'014'200ull) == 999u,
+                "exact NTSC vblank drifted: field 1000 came early")) return 1;
+    if (!expect(countVblanks({true, false}, 615'014'600ull) == 1000u,
+                "exact NTSC vblank did not reach field 1000")) return 1;
+    if (!expect(countVblanks({false, false}, 615'014'200ull) == 1000u,
+                "the default NTSC vblank period changed")) return 1;
 
     iop.reset();
     host.logs.clear();
