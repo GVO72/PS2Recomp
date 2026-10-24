@@ -28,6 +28,18 @@ public:
                    : ps2x::iop::RpcResult{};
     }
 
+    [[nodiscard]] static ps2x::iop::RpcResult handleRpcWithSendData(
+        PS2Runtime *runtime,
+        uint8_t *rdram,
+        R5900Context *context,
+        ps2x::iop::RpcRequest request,
+        std::span<const uint8_t> sendData)
+    {
+        return runtime
+                   ? runtime->handleIopRpcWithSendData(rdram, context, std::move(request), sendData)
+                   : ps2x::iop::RpcResult{};
+    }
+
     [[nodiscard]] static bool canBindRpc(const PS2Runtime *runtime, uint32_t sid)
     {
         return !runtime || runtime->canBindIopRpc(sid);

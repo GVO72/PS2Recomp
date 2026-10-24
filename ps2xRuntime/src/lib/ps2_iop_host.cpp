@@ -132,11 +132,34 @@ bool PS2IopHostAdapter::guestRange(uint32_t address, size_t size, uint8_t *&begi
     return true;
 }
 
+void PS2IopHostAdapter::stageGuestRead(uint32_t address, std::span<const uint8_t> bytes)
+{
+    m_stagedRead.assign(bytes.begin(), bytes.end());
+    m_stagedReadAddress = address;
+    m_hasStagedRead = true;
+}
+
+void PS2IopHostAdapter::clearStagedGuestRead()
+{
+    m_stagedRead.clear();
+    m_hasStagedRead = false;
+}
+
 bool PS2IopHostAdapter::readGuest(uint32_t address, void *destination, size_t size) const
 {
     if (!destination && size != 0)
     {
         return false;
+    }
+    if (m_hasStagedRead && address >= m_stagedReadAddress &&
+        address - m_stagedReadAddress <= m_stagedRead.size() &&
+        size <= m_stagedRead.size() - (address - m_stagedReadAddress))
+    {
+        if (size != 0)
+        {
+            std::memcpy(destination, m_stagedRead.data() + (address - m_stagedReadAddress), size);
+        }
+        return true;
     }
     uint8_t *source = nullptr;
     if (!guestRange(address, size, source))

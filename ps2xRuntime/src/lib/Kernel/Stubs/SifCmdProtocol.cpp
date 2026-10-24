@@ -195,23 +195,19 @@ namespace ps2_stubs::sif_protocol
             }
 
             // The call data arrived in the server's IOP buffer just before this
-            // packet. The runtime's RPC handlers read it from EE memory, so hand
-            // them an EE copy.
+            // packet. It is handed to the RPC handlers as staged data, never
+            // written into EE memory, which belongs to the guest.
             std::vector<uint8_t> sendData(sendSize);
             if (sendSize != 0u && !runtime->readIopMemory(bound.buffer, sendData.data(), sendData.size()))
                 sendData.assign(sendSize, 0u);
-            const uint32_t sendCopy = runtime->guestMalloc(std::max<uint32_t>(sendSize, 16u), 64u);
-            if (uint8_t *dest = eeRam(rdram, sendCopy, sendSize))
-                std::memcpy(dest, sendData.data(), sendData.size());
 
             ps2x::iop::RpcRequest request{};
             request.clientAddress = client;
             request.sid = bound.sid;
             request.function = function;
-            request.send = {sendCopy, sendSize};
             request.receive = {receiveBuffer, receiveSize};
-            const ps2x::iop::RpcResult result = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
-            runtime->guestFree(sendCopy);
+            const ps2x::iop::RpcResult result =
+                PS2IopTransport::handleRpcWithSendData(runtime, rdram, ctx, request, sendData);
 
             if (!result.handled)
             {
