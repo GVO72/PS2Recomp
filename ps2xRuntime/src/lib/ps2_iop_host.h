@@ -95,6 +95,10 @@ public:
     // into the guest.
     void stageGuestRead(uint32_t address, std::span<const uint8_t> bytes);
     void clearStagedGuestRead();
+    int32_t openGuestFile(std::string_view path, uint32_t flags) override;
+    int32_t closeGuestFile(int32_t descriptor) override;
+    int64_t readGuestFile(int32_t descriptor, void *destination, size_t size) override;
+    int64_t seekGuestFile(int32_t descriptor, int64_t offset, int whence) override;
 
 private:
     friend class CallScope;
