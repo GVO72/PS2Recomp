@@ -505,8 +505,9 @@ bool GS::readDisplayExact(DisplayImage &out, bool field)
     out = DisplayImage{};
     if (!m_privRegs || !m_backend)
     {
-        std::cerr << "[gs-readout] unsupported: the GS has no privileged registers or backend" << std::endl;
-        return false;
+        std::cerr << "[gs-readout] approximated the GS having no privileged registers or backend: a blank frame"
+                  << std::endl;
+        return true;
     }
     m_backend->Flush();
     m_backend->Sync(GSSyncReason::Presentation);

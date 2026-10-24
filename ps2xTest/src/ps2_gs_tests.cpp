@@ -4820,14 +4820,24 @@ void register_ps2_gs_tests()
             t.IsTrue(img.width == 64 && px(img, 63, 31, 0) == 63 && px(img, 63, 31, 1) == 31, "last pixel");
         });
 
-        // Not reproduced: a 4:1 downscale lands destination pixel centres exactly on texel edges.
-        tc.Run("readout: an ambiguous nearest-sampling scale is refused, not guessed", [](TestCase &t)
+        // Approximated: a 4:1 downscale lands destination pixel centres exactly on texel edges;
+        // the plain formula is used and the case is logged once.
+        tc.Run("readout: an ambiguous nearest-sampling scale is approximated, logged once", [](TestCase &t)
         {
             Fixture f;
             f.regs.display2 = Fixture::display(642, 25, 0, 0, 256, 32); // MAGH = 0: 256 pixels read, 64 shown
             DisplayImage img;
-            t.IsFalse(f.gs.readDisplayExact(img, false), "read-out reports unsupported");
-            t.IsTrue(img.blank, "no image is returned");
+            std::ostringstream captured;
+            std::streambuf *old = std::cerr.rdbuf(captured.rdbuf());
+            const bool first = f.gs.readDisplayExact(img, false);
+            const bool second = f.gs.readDisplayExact(img, false);
+            std::cerr.rdbuf(old);
+            const std::string log = captured.str();
+            t.IsTrue(first && second, "read-out succeeds");
+            t.IsTrue(!img.blank && img.width == 64 && img.height == 32 && img.rgb.size() == 64u * 32u * 3u, "an image of the right size");
+            const size_t at = log.find("[gs-readout] approximated");
+            t.IsTrue(at != std::string::npos && log.find("[gs-readout] approximated", at + 1) == std::string::npos,
+                     "logged exactly once");
         });
 
         // GSDevice::DoMerge with MMOD = 0: circuit 2 is copied, circuit 1 is blended over it with
@@ -4960,26 +4970,45 @@ void register_ps2_gs_tests()
             }
         });
 
-        // Refused states fail loudly.
-        tc.Run("readout: unsupported states return false", [](TestCase &t)
+        // States it cannot reproduce still give an image of the right size and a log line.
+        tc.Run("readout: unsupported states are approximated, never refused", [](TestCase &t)
         {
+            auto run = [&t](Fixture &f, DisplayImage &img, const char *what)
+            {
+                std::ostringstream captured;
+                std::streambuf *old = std::cerr.rdbuf(captured.rdbuf());
+                const bool ok = f.gs.readDisplayExact(img, false);
+                std::cerr.rdbuf(old);
+                t.IsTrue(ok, what);
+                t.IsTrue(captured.str().find("[gs-readout] approximated") != std::string::npos, what);
+            };
             {
                 Fixture f;
                 f.regs.extwrite = 1ull;
                 DisplayImage img;
-                t.IsFalse(f.gs.readDisplayExact(img, false), "feedback merge (EXTWRITE.WRITE)");
+                run(f, img, "feedback merge (EXTWRITE.WRITE)");
+                t.IsTrue(!img.blank && img.width == 64 && img.height == 32, "the normal merge is shown");
             }
             {
                 Fixture f;
                 f.regs.smode1 = 1ull << 13; // CMOD = 1
                 DisplayImage img;
-                t.IsFalse(f.gs.readDisplayExact(img, false), "unknown video mode");
+                run(f, img, "unknown video mode");
+                t.IsTrue(!img.blank && img.width == 64 && img.height == 32, "the NTSC geometry is used");
             }
             {
                 Fixture f;
                 f.regs.dispfb2 = Fixture::dispfb(0, 2, GS_PSM_T8, 0, 0);
                 DisplayImage img;
-                t.IsFalse(f.gs.readDisplayExact(img, false), "paletted display format");
+                run(f, img, "paletted display format");
+                t.IsTrue(img.blank, "the circuit shows nothing");
+            }
+            {
+                Fixture f;
+                f.regs.dispfb2 = Fixture::dispfb(0, 63, GS_PSM_CT32, 0, 0); // 4032 pixels wide: over the 1024 read buffer
+                DisplayImage img;
+                run(f, img, "oversized read");
+                t.IsTrue(!img.blank && img.width == 64 && img.height == 32, "the clamped read still fills the display");
             }
         });
     });

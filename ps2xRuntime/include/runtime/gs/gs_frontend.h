@@ -152,8 +152,9 @@ public:
     // size cap. Drawing is synchronous: GIF packets are applied to local memory on the calling
     // thread as they are submitted, and the backend is flushed here for backends that defer.
     // Call it on the game thread, once per vsync, in order (it carries CRTC state from vsync to
-    // vsync). Returns false after logging "[gs-readout] unsupported ..." for a state it does not
-    // reproduce, or if the GS has no privileged registers; `out` is then blank.
+    // vsync). Always returns true: a state it does not reproduce exactly gets a reasonable image
+    // and a "[gs-readout] approximated ..." line, once per case (a GS with no privileged
+    // registers gives a blank image).
     bool readDisplayExact(DisplayImage &out, bool field);
     const uint8_t *localMemory() const { return m_localMemoryStorage; }
     uint32_t localMemorySize() const { return m_localMemorySize; }

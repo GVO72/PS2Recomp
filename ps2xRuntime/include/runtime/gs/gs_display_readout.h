@@ -3,10 +3,12 @@
 
 // Exact display read-out: the image PCSX2 v2.8.2 (software renderer, native resolution) hands to
 // its output stage for one vsync, as 8-bit RGB. See gs_display_readout.cpp for the PCSX2
-// functions it mirrors and the cases it refuses.
+// functions it mirrors and the cases it approximates.
 
 #include <cstdint>
 #include <functional>
+#include <set>
+#include <string>
 #include <vector>
 
 struct DisplayImage
@@ -57,9 +59,9 @@ public:
     // local memory. `field` is the current field (CSR.FIELD); the oracle's deinterlace mode is
     // Off, where PCSX2's merge does not look at it, so it does not change the image.
     //
-    // Returns true with `out` filled in (blank or not). Returns false, after printing
-    // "[gs-readout] unsupported ..." to stderr, for a state it does not reproduce; `out` is then
-    // blank and must not be used as an image.
+    // Always returns true with `out` filled in (blank or not). A state it does not reproduce
+    // exactly gets a reasonable image, and the first time each such case is met it prints
+    // "[gs-readout] approximated ..." to stderr (the choices are listed in the .cpp header).
     bool read(const GSDisplayRegs &regs, const ReadPixelFn &readPixel, bool field, DisplayImage &out);
 
 private:
@@ -96,7 +98,8 @@ private:
         std::vector<uint32_t> rgba;
     };
 
-    struct Unsupported;
+    // Logs "[gs-readout] approximated <what>" the first time `key` is seen.
+    void approximated(const std::string &key, const std::string &what) const;
 
     bool readImpl(const GSDisplayRegs &regs, const ReadPixelFn &readPixel, DisplayImage &out);
 
@@ -121,6 +124,7 @@ private:
     bool m_togglingField = false;
     Circuit m_circuits[2];
     int m_scanmaskUsed = 0;
+    mutable std::set<std::string> m_approximated; // cases already logged; kept across reset()
 };
 
 #endif

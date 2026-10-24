@@ -40,17 +40,28 @@
 // field, ShadeBoost, FXAA and bilinear presentation are off, and the "automatic" deinterlace
 // state (game_deinterlacing, scanmask_frame) is not used.
 //
-// Cases NOT reproduced; each fails loudly with "[gs-readout] unsupported ..." and read() returns
-// false, so a wrong image is never returned silently:
-//   - EXTWRITE.WRITE = 1 (feedback merge, GetFeedbackOutput, the YUV passes);
-//   - an unknown video mode (SMODE1.CMOD = 1);
-//   - a read framebuffer whose coordinates wrap at 2048, or whose width is over 1024 pixels
-//     (the software renderer's read buffer is 1024 pixels wide);
-//   - a DISPFB pixel format other than CT32, CT24, CT16 and CT16S;
+// Cases NOT reproduced exactly. The read-out never refuses a frame (the goal is a port that
+// behaves like the game, not one that matches PCSX2 pixel for pixel). Each case below gets the
+// stated approximation and logs "[gs-readout] approximated ..." once per case (per readout):
+//   - EXTWRITE.WRITE = 1 (feedback merge, GetFeedbackOutput, the YUV passes): ignored; the
+//     normal merge of the two read circuits is shown;
+//   - an unknown video mode (SMODE1.CMOD = 1): the previous video mode is kept (NTSC before
+//     the first valid one);
+//   - a framebuffer rectangle reaching 2048 (GetFramebufferSize): clamped to 2047;
+//   - a read framebuffer that wraps at 2048, or is over 1024 pixels wide or tall (the software
+//     renderer's read buffer is 1024 x 1024): clamped, the rest is not read; the source
+//     rectangle then samples with clamp-to-edge, so the last column or row is repeated;
+//   - a negative framebuffer origin: clamped to 0;
+//   - a DISPFB pixel format other than CT32, CT24, CT16 and CT16S (paletted, unknown): no
+//     texture for that circuit, as PCSX2 does for an unusable framebuffer, so the circuit shows
+//     nothing (black, or the other circuit);
+//   - a framebuffer height under 1: no texture for that circuit;
 //   - source and destination rectangles whose nearest sampling is ambiguous (a destination
 //     pixel centre within 0.001 texel of a texel edge, as in a 4:1 downscale), because llvmpipe
-//     breaks such ties by float rounding;
-//   - a destination rectangle with negative extent, and a merge target outside 1..16384.
+//     breaks such ties by float rounding: the plain formula floor(u) is used;
+//   - a destination rectangle with negative extent: not drawn;
+//   - a merge target under 1 pixel: a blank frame; over 16384: clamped to 16384;
+//   - a GS with no privileged registers or backend (GS::readDisplayExact): a blank frame.
 // GS dumps and hardware-renderer-only paths are out of scope.
 
 #include "runtime/gs/gs_display_readout.h"
@@ -59,13 +70,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
-#include <stdexcept>
 #include <string>
-
-struct GSDisplayReadout::Unsupported : std::runtime_error
-{
-    using std::runtime_error::runtime_error;
-};
 
 namespace
 {
@@ -132,16 +137,14 @@ bool GSDisplayReadout::read(const GSDisplayRegs &regs, const ReadPixelFn &readPi
 {
     (void)field; // InterlaceMode Off: Merge does not use the field.
     out = DisplayImage{};
-    try
-    {
-        return readImpl(regs, readPixel, out);
-    }
-    catch (const Unsupported &e)
-    {
-        std::cerr << "[gs-readout] unsupported " << e.what() << std::endl;
-        out = DisplayImage{};
-        return false;
-    }
+    readImpl(regs, readPixel, out);
+    return true;
+}
+
+void GSDisplayReadout::approximated(const std::string &key, const std::string &what) const
+{
+    if (m_approximated.insert(key).second)
+        std::cerr << "[gs-readout] approximated " << what << std::endl;
 }
 
 bool GSDisplayReadout::isAnalogue() const
@@ -327,7 +330,11 @@ GSDisplayReadout::Point GSDisplayReadout::framebufferSize(int display) const
         const Rect &b = m_circuits[1].framebufferRect;
         R4 combined = runion({a.x, a.y, a.z, a.w}, {b.x, b.y, b.z, b.w});
         if (combined.z >= 2048 || combined.w >= 2048)
-            throw Unsupported("framebuffer wraps at 2048 (GetFramebufferSize)");
+        {
+            approximated("fb-size-2048", "a framebuffer rectangle reaching 2048 (GetFramebufferSize): clamped to 2047");
+            combined.z = std::min(combined.z, 2047);
+            combined.w = std::min(combined.w, 2047);
+        }
 
         const int minMag = std::max(1, std::min(m_circuits[0].magnification.y, m_circuits[1].magnification.y));
         const Rect &da = m_circuits[0].displayRect;
@@ -344,7 +351,11 @@ GSDisplayReadout::Point GSDisplayReadout::framebufferSize(int display) const
 
     Rect out = m_circuits[display].framebufferRect;
     if (out.z >= 2048 || out.w >= 2048)
-        throw Unsupported("framebuffer wraps at 2048 (GetFramebufferSize)");
+    {
+        approximated("fb-size-2048", "a framebuffer rectangle reaching 2048 (GetFramebufferSize): clamped to 2047");
+        out.z = std::min(out.z, 2047);
+        out.w = std::min(out.w, 2047);
+    }
     const int minMag = std::max(1, m_circuits[display].magnification.y);
     int offset = m_circuits[display].displayRect.y;
     if (m_ffmd && m_interlaced)
@@ -549,30 +560,44 @@ bool GSDisplayReadout::getOutput(int display, const ReadPixelFn &readPixel, Text
 
     const int psm = cur.psm;
     if (psm != kPsmCT32 && psm != kPsmCT24 && psm != kPsmCT16 && psm != kPsmCT16S)
-        throw Unsupported("display pixel format " + std::to_string(psm));
+    {
+        approximated("psm-" + std::to_string(psm),
+                     "display pixel format " + std::to_string(psm) + ": the circuit shows nothing");
+        return false;
+    }
 
-    const int w = cur.fbw * 64;
-    const int h = size.y;
+    int w = cur.fbw * 64;
+    int h = size.y;
     if (h < 1)
-        throw Unsupported("framebuffer height " + std::to_string(h));
+    {
+        approximated("fb-height", "a framebuffer height under 1: the circuit shows nothing");
+        return false;
+    }
     if (fr.x < 0 || fr.y < 0)
-        throw Unsupported("negative framebuffer origin");
+        approximated("fb-origin", "a negative framebuffer origin: clamped to 0");
+    const int frX = std::max(fr.x, 0), frY = std::max(fr.y, 0);
 
     int bsx, bsy;
     blockSize(psm, bsx, bsy);
-    const int offX = (fr.x & 0x7ff) & ~(bsx - 1);
-    const int offXEnd = ((fr.x & 0x7ff) + (bsx - 1)) & ~(bsx - 1);
-    const int offY = (fr.y & 0x7ff) & ~(bsy - 1);
-    const int offYEnd = ((fr.y & 0x7ff) + (bsy - 1)) & ~(bsy - 1);
+    const int offX = (frX & 0x7ff) & ~(bsx - 1);
+    const int offXEnd = ((frX & 0x7ff) + (bsx - 1)) & ~(bsx - 1);
+    const int offY = (frY & 0x7ff) & ~(bsy - 1);
+    const int offYEnd = ((frY & 0x7ff) + (bsy - 1)) & ~(bsy - 1);
 
     removeFramebufferOffset(display);
 
-    if (w + offXEnd >= 2048 || h + offYEnd >= 2048)
-        throw Unsupported("framebuffer read wraps at 2048");
     // m_output is 1024 pixels wide and 1024 rows tall; PCSX2 reads w + offXEnd - offX pixels per
-    // row, so a wider read would spill into its next row.
-    if ((w + offXEnd - offX) > 1024 || (h + offYEnd - offY) > 1024)
-        throw Unsupported("framebuffer read larger than the 1024x1024 read buffer");
+    // row, so a wider read would spill into its next row. Reads that wrap at 2048 or exceed
+    // that buffer are clamped (the cap of 1024 is the tighter one).
+    const int maxW = 1024 - (offXEnd - offX), maxH = 1024 - (offYEnd - offY);
+    if (w + offXEnd >= 2048 || h + offYEnd >= 2048 || w > maxW || h > maxH)
+    {
+        approximated("fb-read-clamp", "a framebuffer read that wraps at 2048 or exceeds the 1024x1024 read buffer: clamped");
+        w = std::min({w, maxW, 2047 - offXEnd});
+        h = std::min({h, maxH, 2047 - offYEnd});
+        if (w < 1 || h < 1)
+            return false;
+    }
 
     tex.width = w;
     tex.height = h;
@@ -634,7 +659,10 @@ bool GSDisplayReadout::readImpl(const GSDisplayRegs &regs, const ReadPixelFn &re
         break;
     }
     if (mode == kUnknown)
-        throw Unsupported("video mode (SMODE1.CMOD = " + std::to_string(cmod) + ")");
+    {
+        approximated("video-mode", "an unknown video mode (SMODE1.CMOD = " + std::to_string(cmod) + "): the previous mode is kept");
+        mode = m_videomode + 1;
+    }
     m_videomode = mode - 1;
 
     const bool reallyInterlaced = (bits(regs.syncv, 0, 10) & 1u) != 0 && cmod != 0;
@@ -648,7 +676,7 @@ bool GSDisplayReadout::readImpl(const GSDisplayRegs &regs, const ReadPixelFn &re
 
     // --- GSRenderer::Merge.
     if (bits(regs.extwrite, 0, 1) == 1)
-        throw Unsupported("feedback merge (EXTWRITE.WRITE = 1)");
+        approximated("extwrite", "a feedback merge (EXTWRITE.WRITE = 1): the normal merge is shown");
 
     if (!m_circuits[0].enabled && !m_circuits[1].enabled)
         return true; // blank
@@ -690,9 +718,16 @@ bool GSDisplayReadout::readImpl(const GSDisplayRegs &regs, const ReadPixelFn &re
     Rect dst[2] = {m_circuits[0].displayRect, m_circuits[1].displayRect};
     Rect src[2] = {m_circuits[0].framebufferRect, m_circuits[1].framebufferRect};
 
-    const Point fs = resolution();
+    Point fs = resolution();
     if (fs.x < 1 || fs.y < 1 || fs.x > 16384 || fs.y > 16384)
-        throw Unsupported("merge target size " + std::to_string(fs.x) + "x" + std::to_string(fs.y));
+    {
+        approximated("merge-size", "a merge target of " + std::to_string(fs.x) + "x" + std::to_string(fs.y) +
+                                       ": a blank frame if under 1 pixel, else clamped to 16384");
+        if (fs.x < 1 || fs.y < 1)
+            return true; // blank
+        fs.x = std::min(fs.x, 16384);
+        fs.y = std::min(fs.y, 16384);
+    }
 
     if (tex[0] == tex[1] && requal({src[0].x, src[0].y, src[0].z, src[0].w}, {src[1].x, src[1].y, src[1].z, src[1].w}) &&
         requal({dst[0].x, dst[0].y, dst[0].z, dst[0].w}, {dst[1].x, dst[1].y, dst[1].z, dst[1].w}) && !pmodeSlbg)
@@ -721,7 +756,10 @@ bool GSDisplayReadout::readImpl(const GSDisplayRegs &regs, const ReadPixelFn &re
         const int dw = d.z - d.x;
         const int dh = d.w - d.y;
         if (dw < 0 || dh < 0)
-            throw Unsupported("destination rectangle with negative extent");
+        {
+            approximated("dst-negative", "a destination rectangle with negative extent: not drawn");
+            return;
+        }
         if (dw == 0 || dh == 0)
             return;
         const int x0 = std::max(d.x, 0), x1 = std::min(d.z, fs.x);
@@ -738,8 +776,8 @@ bool GSDisplayReadout::readImpl(const GSDisplayRegs &regs, const ReadPixelFn &re
                 const int lo = std::clamp(static_cast<int>(std::floor(u - 1e-3)), 0, texSize - 1);
                 const int hi = std::clamp(static_cast<int>(std::floor(u + 1e-3)), 0, texSize - 1);
                 if (lo != hi)
-                    throw Unsupported("ambiguous nearest sampling (destination pixel centre on a texel edge)");
-                idx[static_cast<size_t>(p - from)] = hi;
+                    approximated("nearest-tie", "an ambiguous nearest sampling (destination pixel centre on a texel edge): the plain formula is used");
+                idx[static_cast<size_t>(p - from)] = std::clamp(static_cast<int>(std::floor(u)), 0, texSize - 1);
             }
         };
         std::vector<int> ix, iy;
