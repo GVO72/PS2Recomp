@@ -730,6 +730,18 @@ bool PS2Runtime::syncCoreSubsystems()
     return true;
 }
 
+void PS2Runtime::setRunMode(const RunMode &mode)
+{
+    m_runMode = mode;
+    // Headless has no window to read input from.
+    m_padBackend.setHostInputEnabled(!mode.headless);
+}
+
+const PS2Runtime::RunMode &PS2Runtime::runMode() const
+{
+    return m_runMode;
+}
+
 bool PS2Runtime::initialize(const char *title)
 {
     try
@@ -744,6 +756,13 @@ bool PS2Runtime::initialize(const char *title)
         {
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
+        }
+        if (m_runMode.headless)
+        {
+            // No window, GL context or audio device; the audio backend stays not ready,
+            // so every audio call is a no-op.
+            m_audioBackend.setAudioReady(false);
+            return true;
         }
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
@@ -2374,10 +2393,14 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
-    // A blank image to use as a framebuffer
-    Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
-    Texture2D frameTex = LoadTextureFromImage(blank);
-    UnloadImage(blank);
+    // A blank image to use as a framebuffer (none when headless: there is no GL context).
+    Texture2D frameTex{};
+    if (!m_runMode.headless)
+    {
+        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
+        frameTex = LoadTextureFromImage(blank);
+        UnloadImage(blank);
+    }
 
     std::atomic<bool> gameThreadFinished{false};
 
@@ -2401,6 +2424,16 @@ void PS2Runtime::run()
             std::cerr << "Error during program execution: unknown exception" << std::endl;
         }
         gameThreadFinished.store(true, std::memory_order_release); });
+
+    if (m_runMode.headless)
+    {
+        // No render loop: the game thread ends when the guest stops or requestStop() reaches
+        // the scheduler, which wakes it from any wait.
+        gameThread.join();
+        requestStop();
+        RUNTIME_LOG("[run] exiting (headless)");
+        return;
+    }
 
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))

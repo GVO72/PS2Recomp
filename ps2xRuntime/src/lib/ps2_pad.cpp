@@ -38,6 +38,13 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
 
     uint16_t btns = 0xFFFFu;
+    if (!m_hostInputEnabled)
+    {
+        // Every button released, sticks centred; nothing is read from the host.
+        data[2] = static_cast<uint8_t>(btns & 0xFF);
+        data[3] = static_cast<uint8_t>(btns >> 8);
+        return true;
+    }
     constexpr int kGamepad = 0;
     const bool useGamepad = IsGamepadAvailable(kGamepad);
     auto clearBit = [&btns](uint16_t mask)

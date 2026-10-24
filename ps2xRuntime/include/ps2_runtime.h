@@ -283,8 +283,22 @@ public:
         std::filesystem::path cdImage;
     };
 
+    // How the runtime talks to the host. The defaults are the interactive
+    // behaviour: a window, an audio device, host time and host input.
+    struct RunMode
+    {
+        // No window, no audio device and no render loop: no raylib function that
+        // needs a window, a GL context or an audio device is called, from any thread.
+        // run() then only starts the game thread and waits for it.
+        bool headless = false;
+    };
+
     PS2Runtime();
     ~PS2Runtime();
+
+    // Set before initialize(); a later call has no effect on what initialize() did.
+    void setRunMode(const RunMode &mode);
+    const RunMode &runMode() const;
 
     bool initialize(const char *title = "PS2 Game");
     bool syncCoreSubsystems();
@@ -538,6 +552,7 @@ private:
     DebugUiCallback m_debugUiShutdownCallback = nullptr;
     void *m_debugUiUserData = nullptr;
     bool m_debugUiInitialized = false;
+    RunMode m_runMode{};
 
 public:
     std::atomic<uint32_t> m_debugPc{0};
