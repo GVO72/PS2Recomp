@@ -138,5 +138,34 @@ namespace ps2x::iop
         {
             log(LogLevel::Info, text);
         }
+
+        // Files the IOP opens by guest path (rom0:, host:, cdrom0:, ...), through
+        // the host's own file layer, with ioman open flags. Negative results are
+        // errors; the defaults have no files.
+        virtual int32_t openGuestFile(std::string_view path, uint32_t flags)
+        {
+            (void)path;
+            (void)flags;
+            return -1;
+        }
+        virtual int32_t closeGuestFile(int32_t descriptor)
+        {
+            (void)descriptor;
+            return -1;
+        }
+        virtual int64_t readGuestFile(int32_t descriptor, void *destination, size_t size)
+        {
+            (void)descriptor;
+            (void)destination;
+            (void)size;
+            return -1;
+        }
+        virtual int64_t seekGuestFile(int32_t descriptor, int64_t offset, int whence)
+        {
+            (void)descriptor;
+            (void)offset;
+            (void)whence;
+            return -1;
+        }
     };
 }

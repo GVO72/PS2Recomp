@@ -62,6 +62,126 @@ namespace
         require(host.word(0x800u) == text.size(), "write must return the byte count");
     }
 
+    // A host whose file layer holds one file, rom0:ROMVER.
+    class FileHost final : public IopHost
+    {
+    public:
+        explicit FileHost(Host &inner) : base(inner) {}
+
+        bool readGuest(uint32_t a, void *d, size_t n) const override { return base.readGuest(a, d, n); }
+        bool writeGuest(uint32_t a, const void *s, size_t n) override { return base.writeGuest(a, s, n); }
+        bool zeroGuest(uint32_t a, size_t n) override { return base.zeroGuest(a, n); }
+        bool normalizeGuestAddress(uint32_t a, uint32_t &n) const override { return base.normalizeGuestAddress(a, n); }
+        uint32_t allocateIopHandle(IopHandleKind k) override { return base.allocateIopHandle(k); }
+        uint32_t allocateGuest(uint32_t s, uint32_t a) override { return base.allocateGuest(s, a); }
+        void freeGuest(uint32_t a) override { base.freeGuest(a); }
+        void audioCommand(uint32_t s, uint32_t f, GuestBuffer a, GuestBuffer b) override { base.audioCommand(s, f, a, b); }
+        std::string hostPath(HostPathKind k) const override { return base.hostPath(k); }
+        std::string translateGuestPath(std::string_view p) const override { return base.translateGuestPath(p); }
+        uint64_t openHostFile(std::string_view p) override { return base.openHostFile(p); }
+        bool hostFileSize(uint64_t h, uint64_t &s) const override { return base.hostFileSize(h, s); }
+        bool readHostFile(uint64_t h, uint64_t o, void *d, size_t s, size_t &r) override
+        {
+            return base.readHostFile(h, o, d, s, r);
+        }
+        void closeHostFile(uint64_t h) override { base.closeHostFile(h); }
+        int32_t memoryCard(const MemoryCardRequest &r) override { return base.memoryCard(r); }
+        bool hasGuestFunction(uint32_t a) const override { return base.hasGuestFunction(a); }
+        bool invokeGuestFunction(uint64_t t, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e,
+                                 uint32_t *r) override
+        {
+            return base.invokeGuestFunction(t, a, b, c, d, e, r);
+        }
+        void log(LogLevel l, std::string_view m) override { base.log(l, m); }
+        void writeConsole(std::string_view t) override { base.writeConsole(t); }
+
+        int32_t openGuestFile(std::string_view path, uint32_t flags) override
+        {
+            lastFlags = flags;
+            if (path != "rom0:ROMVER")
+                return -1;
+            open = true;
+            position = 0;
+            return 7;
+        }
+        int32_t closeGuestFile(int32_t fd) override
+        {
+            if (fd != 7 || !open)
+                return -1;
+            open = false;
+            return 0;
+        }
+        int64_t readGuestFile(int32_t fd, void *destination, size_t size) override
+        {
+            if (fd != 7 || !open)
+                return -1;
+            const size_t n = std::min(size, romver.size() - position);
+            std::memcpy(destination, romver.data() + position, n);
+            position += n;
+            return static_cast<int64_t>(n);
+        }
+        int64_t seekGuestFile(int32_t fd, int64_t offset, int whence) override
+        {
+            if (fd != 7 || !open || whence != 0)
+                return -1;
+            position = static_cast<size_t>(offset);
+            return offset;
+        }
+
+        Host &base;
+        const std::string romver = "0200AC20040614";
+        bool open = false;
+        size_t position = 0;
+        uint32_t lastFlags = 0;
+    };
+
+    void fileioFiles()
+    {
+        Host inner;
+        FileHost host(inner);
+        IopSubsystem iop(host);
+
+        auto openArg = fileioOpenArg("rom0:ROMVER");
+        const int32_t readOnly = 1;
+        std::memcpy(openArg.data(), &readOnly, 4u);
+        require(iop.handleRpc(fileioCall(inner, 0u, openArg)).handled, "open not handled");
+        const int32_t fd = static_cast<int32_t>(inner.word(0x800u));
+        require(fd == 3 && host.open && host.lastFlags == 1u, "rom0:ROMVER should open with its mode");
+
+        // read(fd, ptr=0x400, 4) with read_data at 0x500 pre-filled with junk.
+        std::vector<uint8_t> readArg(16u, 0u);
+        const uint32_t ptr = 0x400u, size = 4u, readData = 0x500u;
+        std::memcpy(readArg.data(), &fd, 4u);
+        std::memcpy(readArg.data() + 4u, &ptr, 4u);
+        std::memcpy(readArg.data() + 8u, &size, 4u);
+        std::memcpy(readArg.data() + 12u, &readData, 4u);
+        require(iop.handleRpc(fileioCall(inner, 2u, readArg)).handled, "read not handled");
+        require(inner.word(0x800u) == 4u, "read returns the byte count");
+        require(std::memcmp(inner.guest.data() + 0x400u, "0200", 4u) == 0, "read data reaches EE memory");
+        require(inner.word(0x500u) == 0u && inner.word(0x504u) == 0u, "no unaligned edges for the EE to copy");
+
+        std::vector<uint8_t> seekArg(16u, 0u);
+        const int32_t offset = 10, whence = 0;
+        std::memcpy(seekArg.data(), &fd, 4u);
+        std::memcpy(seekArg.data() + 4u, &offset, 4u);
+        std::memcpy(seekArg.data() + 8u, &whence, 4u);
+        require(iop.handleRpc(fileioCall(inner, 4u, seekArg)).handled, "lseek not handled");
+        require(inner.word(0x800u) == 10u, "lseek returns the new position");
+        require(iop.handleRpc(fileioCall(inner, 2u, readArg)).handled && inner.word(0x800u) == 4u,
+                "read after lseek");
+        require(std::memcmp(inner.guest.data() + 0x400u, "0614", 4u) == 0, "read continues at the position");
+
+        require(iop.handleRpc(fileioCall(inner, 1u, fileioFdArg(fd))).handled && inner.word(0x800u) == 0u &&
+                    !host.open,
+                "close releases the host file");
+        require(iop.handleRpc(fileioCall(inner, 2u, readArg)).handled &&
+                    static_cast<int32_t>(inner.word(0x800u)) == -9,
+                "a closed file is EBADF");
+        require(iop.handleRpc(fileioCall(inner, 0u, fileioOpenArg("rom0:NOPE"))).handled &&
+                    static_cast<int32_t>(inner.word(0x800u)) == -2,
+                "a missing file is ENOENT");
+    }
+
     void fileioTtyAndErrors()
     {
         Host host;
@@ -82,7 +202,7 @@ namespace
         require(static_cast<int32_t>(host.word(0x800u)) == -9, "a closed descriptor is EBADF");
         require(iop.handleRpc(fileioCall(host, 0u, fileioOpenArg("cdrom0:\\X.BIN;1"))).handled, "open failed");
         require(static_cast<int32_t>(host.word(0x800u)) == -2, "non-tty opens are not implemented");
-        require(iop.handleRpc(fileioCall(host, 4u, fileioFdArg(1))).handled, "lseek not handled");
+        require(iop.handleRpc(fileioCall(host, 5u, fileioFdArg(1))).handled, "ioctl not handled");
         require(static_cast<int32_t>(host.word(0x800u)) == -5, "unimplemented functions fail");
         require(host.logs.size() == logs + 3u, "each unsupported request must be logged");
         require(host.console == text, "failed requests must not print anything");
@@ -391,6 +511,7 @@ int main()
         {"LIBSD audio dispatch is unchanged", libsdUnchanged},
         {"FILEIO writes stdout to the console", fileioConsoleWrite},
         {"FILEIO tty descriptors and logged errors", fileioTtyAndErrors},
+        {"FILEIO opens, reads, seeks and closes host files", fileioFiles},
     };
     return run(tests);
 }

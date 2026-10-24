@@ -596,6 +596,30 @@ void PS2IopHostAdapter::writeConsole(std::string_view text)
     }
 }
 
+// IOP file access goes through the same file layer, mounts and ROM device as
+// the EE's file functions, so both processors see the same files.
+int32_t PS2IopHostAdapter::openGuestFile(std::string_view path, uint32_t flags)
+{
+    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+    const PS2VfsMounts mounts{paths.hostRoot, paths.cdRoot, paths.mcRoot};
+    return m_runtime.vfs().open(path, flags, mounts, m_runtime.romDevice());
+}
+
+int32_t PS2IopHostAdapter::closeGuestFile(int32_t descriptor)
+{
+    return m_runtime.vfs().close(descriptor);
+}
+
+int64_t PS2IopHostAdapter::readGuestFile(int32_t descriptor, void *destination, size_t size)
+{
+    return m_runtime.vfs().read(descriptor, destination, size);
+}
+
+int64_t PS2IopHostAdapter::seekGuestFile(int32_t descriptor, int64_t offset, int whence)
+{
+    return m_runtime.vfs().seek(descriptor, offset, whence);
+}
+
 void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)
 {
     const char *prefix = "[ps2xIOP]";
