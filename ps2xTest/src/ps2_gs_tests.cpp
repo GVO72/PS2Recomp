@@ -3972,6 +3972,31 @@ void register_ps2_gs_tests()
                      "triangle fan quad should light at least one framebuffer row");
         });
 
+        tc.Run("sceGsExecLoadImage passes libgraph's block address to BITBLTBUF unchanged", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            uint8_t *const rdram = runtime.memory().getRDRAM();
+            constexpr uint32_t kImageAddr = 0x4000u;
+            constexpr uint32_t kSrcAddr = 0x5000u;
+            // x, y, width, height, vram_addr (dbp, in blocks of 64 words), vram_width, psm
+            const GsImageMem image{0u, 0u, 2u, 2u, 0x1400u, 10u, 0u};
+            writeGsImageTest(rdram, kImageAddr, image);
+            std::memset(rdram + kSrcAddr, 0x7Fu, 16u);
+
+            R5900Context loadCtx{};
+            setRegU32(loadCtx, 4, kImageAddr);
+            setRegU32(loadCtx, 5, kSrcAddr);
+            ps2_stubs::sceGsExecLoadImage(rdram, &loadCtx, &runtime);
+            t.Equals(static_cast<int32_t>(getRegU32Test(loadCtx, 2)), 0, "the upload should succeed");
+            uint64_t bitbltbuf = 0u;
+            std::memcpy(&bitbltbuf, rdram + runtime.guestHeapBase() + 16u, sizeof(bitbltbuf));
+            t.Equals(static_cast<uint32_t>((bitbltbuf >> 32) & 0x3FFFu), 0x1400u,
+                     "BITBLTBUF.DBP should be the dbp the game passed");
+            t.Equals(static_cast<uint32_t>((bitbltbuf >> 48) & 0x3Fu), 10u,
+                     "BITBLTBUF.DBW should be the dbw the game passed");
+        });
+
         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
         {
             PS2Runtime runtime;
